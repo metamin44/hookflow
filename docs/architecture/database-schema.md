@@ -1556,7 +1556,7 @@ is the same place U46 and U41's non-negotiables already live.
 | `payload` must be a JSON object; unknown `payload` members accepted | §4.7 (the shape paragraph), §4.13.1, §4.13.5, overview §11 item 30, §5.1 step 3, §15.3 step 3 | **none deliberate.** `jsonb` accepts every JSON type, so the rule is boundary validation, not a constraint — the same reason U46 has no `CHECK`. Recorded here because the obvious tempting DDL (`CHECK (jsonb_typeof(payload) = 'object')`) would be **redundant** at best: nothing can be inserted that the API did not already accept, and a `CHECK` would suggest the database is the enforcement point when it is not |
 | **`hookflow_ingest_number_inexact_total`** approved by name | §4.7, §4.13.5, overview §11 item 31, §7 there, §15.3 stage 8 | **none.** A counter is not a column, not a table and not a response member; it carries **no numeric threshold** in the contract, and no alert value was invented |
 | **Parse order** (§15.3 steps 1–8) approved as normative | §4.7, §4.13.1, §4.13.5, overview §11 item 29, §5.1 there | **none.** Steps 1–7 stay before `BEGIN` and step 8 is the unchanged claim-first transaction (U4, U42, U43, U44, U45); `maxBodySize` remains **U17**'s unset value |
-| **Conformance gate** approved as a merge requirement | §4.13.5 requirement 4 + acceptance bar, overview §11 item 32, §10 there | **none.** It is test machinery. Status of the evidence: executed on go1.27.3 for the vectors listed in overview §15.2.2; the Phase 7 package executes its implemented suite locally on go1.27.4; **pending** for the Appendix I sample file, V8 cross-checks, sustained fuzzing and hosted-CI execution — so the full suite has not passed and production use must wait for it |
+| **Conformance gate** approved as a merge requirement | §4.13.5 requirement 4 + acceptance bar, overview §11 item 32, §10 there | **none.** It is test machinery. At revision 14, only the overview §15.2.2 vectors had been executed, on go1.27.3; the Appendix I external corpus, V8 cross-checks, sustained fuzzing, go1.27.4 and hosted-CI execution were pending. **Phase 7 update (2026-11-25):** the RFC-vector suite, independent Node.js/V8 comparison and 60-second bounded fuzzing passed locally and in the dedicated hosted `jcs-conformance` job. See the Phase 7 conformance correction in §4.13.5 and overview §16.11. This is bounded conformance evidence, not exhaustive RFC proof or Production Readiness. |
 
 ## 5. Fan-out and message lifecycle
 
@@ -2105,9 +2105,12 @@ overview §13 still shows them.
 * **U47** — the JCS parser/canonicalizer is the standard-library package `encoding/json/jsontext`, chosen at the
   approved go1.27.4 baseline; `github.com/goccy/go-json/jsontext` is recorded as the alternative and **not adopted**,
   and **no JSON dependency is added** (§4.13.5, §4.13.7, overview §11 item 26). The four parser requirements and the
-  three extra obligations survive as obligations of the code path; what they now oblige is a CI conformance run that
-  has **not** happened yet — the Appendix I sample file, V8 cross-checks, fuzzing and every go1.27.4 execution are
-  pending, and the executed evidence is go1.27.3.
+  three extra obligations survive as obligations of the code path. At revision 14 they still required a CI conformance
+  run: the Appendix I external corpus, V8 cross-checks, fuzzing and go1.27.4 execution were pending, and the executed
+  evidence was go1.27.3. **Phase 7 update (2026-11-25):** the RFC-vector suite, independent Node.js/V8 comparison and
+  60-second bounded fuzzing passed locally and in the dedicated hosted `jcs-conformance` job; see §4.13.5's Phase 7
+  conformance correction and overview §16.11. The external Development Portal corpus remains unimported, and this is
+  not exhaustive RFC conformance or Production Readiness.
 * **U48** — Option B: standard RFC 8785 / ECMAScript binary64 number semantics, JSON strings for exact decimals,
   **guard G1 approved** (`math.Abs(f) ≥ 2^53` → `integer_out_of_safe_range`), and **guard G2 deferred rather than
   adopted**, so `number_not_exactly_representable` is not part of the contract and the residue is counted instead
@@ -2119,8 +2122,9 @@ overview §13 still shows them.
   validation stays before the claim, the digest before `BEGIN`, and the claim-first transaction unchanged.
 * **`hookflow_ingest_number_inexact_total`** is approved by name as an observability counter carrying **no numeric
   threshold** in the API contract — §4.13.5, §4.13.7.
-* **The conformance gate** is approved as a merge requirement — §4.13.5, §4.13.7, where executed and pending are
-  listed separately. No suite-wide pass is claimed anywhere in these documents.
+* **The conformance gate** is approved as a merge requirement — §4.13.5, §4.13.7. The original revision-14 record
+  separated executed and pending evidence; the Phase 7 update records the later RFC-vector/V8/bounded-fuzz and
+  hosted-CI results. It does not claim exhaustive RFC conformance or Production Readiness.
 
 Closed by the owner in revision 16: **U1** — UUID generation strategy. Approved as six parts (recorded in overview §11
 item 33, approved in overview §11 item 34; revision 15 had labelled this closed on an approval that had not been given,

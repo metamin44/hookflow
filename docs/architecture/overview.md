@@ -3502,4 +3502,3 @@ approved transaction code was performed.
 
 **R-1 and R-2 remain as recorded.** The composite Publisher/Worker lifecycle test and the
 counter-budget-across-restarts invariant in `docs/operations/configuration.md` are unchanged by this round.
-

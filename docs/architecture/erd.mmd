@@ -1,0 +1,539 @@
+%% HookFlow V1 - Entity Relationship Diagram (canonical 13-table inventory; revision 16 design plus the 2026-11-22 approval alignment, overview §12.16, the 2026-11-23 F3/F8 decisions, overview §12.17, and the 2026-11-23 Recovery expiry-precedence decision, overview §12.18; documentation revision 17 adds no entity or attribute change; revision 18 records Phase 6 with no entity or attribute change)
+%% Render target: Mermaid erDiagram (GitHub, mermaid-cli, VS Code preview).
+%% Companion: database-schema.md holds the full column, constraint and index detail.
+%%
+%% Revision 3 approvals reflected here:
+%%   U5  eager fan-out - events + all deliveries + initial outbox_messages in ONE transaction,
+%%       202 only after COMMIT. Also approved: a configurable max active endpoints per organization,
+%%       which is a service-layer rule and NOT a column, so it does not appear below (U37, U38).
+%%   U16 exact-match event types only - no wildcard or glob matching.
+%%   U33 the destination snapshot is stored on deliveries. events has NO destinations_snapshot column
+%%       and no destination collection of any kind - the snapshot exists in exactly one table.
+%% Still unresolved by instruction AS OF REVISION 3: U1 UUID strategy, U3 PostgreSQL version,
+%% U4 idempotency retention/replay, U6 webhook secret storage and rotation. Of these, U4 was closed in
+%% revision 7 and U41 was closed in revision 8; U1, U3 and U6 stay held open by instruction and nothing in
+%% this diagram presumes an answer for them.
+%%
+%% Revision 4 approvals reflected here:
+%%   U36 events has NO status column. destination_count (non-negative, default 0) is kept and is the
+%%       only record of "accepted but zero endpoints matched" - in that case no deliveries and no
+%%       outbox_messages rows exist, yet the event is still persisted and still returns 202.
+%%       deliveries.state is the single source of truth for processing state.
+%%   U37 the active-endpoint limit is configuration HOOKFLOW_MAX_ACTIVE_ENDPOINTS_PER_ORG (default 100).
+%%       It is deliberately NOT a column on any table, so it does not appear in this diagram.
+%%   U38 the limit is enforced by SELECT ... FOR UPDATE on the parent organizations row, then count,
+%%       then write, all in one transaction. The organizations row is a lock anchor even though no
+%%       column on it participates in the check. Phase 6 implements the lock as FOR NO KEY UPDATE so
+%%       delivery FK checks (FOR KEY SHARE) do not conflict; lock order is organizations -> endpoints
+%%       -> endpoint_subscriptions (database-schema.md revision 18).
+%%   U39 one application service owns that transaction through a shared Unit of Work. This is a code
+%%       layering decision with no schema shape, so nothing in this diagram represents it.
+%%   U40 that layer lives in internal/app, with the event acceptance use case in internal/app/event.
+%%       Domain modules must not depend on internal/app. Again no schema shape: this diagram is 12
+%%       tables and nothing more.
+%%
+%% Revision 6 is code layout only, with no effect on this diagram:
+%%   U26 the Go module path is github.com/metamin44/hookflow (go.mod is still NOT created).
+%%   U28 internal/app/event declares package eventapp, internal/modules/event declares package event.
+%%       No directory was renamed, and no table, column or relationship below changed.
+%%
+%% Revision 7 closes U4 (idempotency) and is the first revision to change the inventory:
+%%   13th table idempotency_records - org key + request fingerprint + the event it produced.
+%%       UNIQUE (organization_id, idempotency_key), 72-hour expires_at, composite FK to events
+%%       (organization_id, id) ON DELETE CASCADE, plain idx on expires_at for the cleanup sweep
+%%       (a partial index on expires_at <= now() is illegal: index predicates must be immutable).
+%%   events LOSES idempotency_key and dedupe_hash - no idempotency data is duplicated there.
+%%   Behaviour: same key + same content replays; same key + different content is HTTP 409;
+%%       concurrent same-key requests accept exactly one event; an expired record is reusable;
+%%       expiring a record never deletes the event or its delivery history.
+%%
+%% Revision 8 closes U41 (request fingerprint canonicalization). Diagram shape is unchanged - 13 tables,
+%%   same 17 relationship lines - and exactly two attribute lines move:
+%%     request_hash   text  -> bytea, i.e. SHA-256(UTF-8(RFC 8785 JCS of {"event_type": .., "payload": ..})).
+%%                  chk_idem_hash_len CHECK (octet_length(request_hash) = 32) replaces the old text/hex
+%%                  length assumption; the column needs no index (it is only compared to the row the key
+%%                  lookup already returned) and bytea compares as raw bytes, not by collation.
+%%     hash_algorithm stays text, now pinned: chk_idem_hash_alg CHECK (hash_algorithm = 'sha256').
+%%   Excluded from the fingerprint by decision: Authorization, Idempotency-Key, request timestamps and
+%%   every other transport header - so no header column participates in it, and none was added.
+%%   Invalid or unrepresentable JSON is HTTP 400 before the key claim, with NO fallback to raw-byte hashing.
+%%   Boundary: the contract only. No Go JCS library is chosen here (that is U47, implementation planning),
+%%   so nothing in this diagram depends on one. U46 (numeric policy in payload, IEEE-754 doubles) was
+%%   opened by that revision and is CLOSED by revision 9, below.
+%%
+%% Revision 9 closes U46 (JSON numeric and parsing policy) and drafts U42-U45 as proposals.
+%%   DATA MODEL: unchanged. Still 13 entity blocks, 17 relationship lines, 152 attribute lines - no table,
+%%   column, key or edge was added, removed or retyped by this revision, and none of the proposals adds one.
+%%   Why U46 has no diagram shape: it constrains which JSON *values* the API accepts
+%%   (integers within +-9007199254740991, larger magnitudes as strings, no duplicate keys, no non-finite
+%%   values, decimals per RFC 8785), and jsonb cannot express any of that - it stores arbitrary-precision
+%%   numerics and resolves duplicate keys silently. So the rule is validation at the boundary, and the only
+%%   thing that changes here is the events.payload pointer note.
+%%   U42 (response contract), U43 (cleanup job), U44 (committed-NULL guard) and U45 (reuse history) were
+%%   drafted as PROPOSALS in that revision - approved in revision 10, below. None of them is an entity, a
+%%   column or an edge; U44's guard is a constraint trigger, which this diagram does not depict.
+%%
+%% Revision 10 approves U42, U43, U44 and U45: the idempotency stack (U4, U41-U46) is now complete.
+%%   DATA MODEL: unchanged again. Still 13 entity blocks, 17 relationship lines, 152 attribute lines -
+%%   nothing added, removed or retyped. What changed, and why none of it is a diagram shape:
+%%     U42 response contract (202 + byte-identical body + replay header + RFC 9457 errors) is HTTP surface.
+%%         It stores nothing: the body comes from events (id, destination_count, received_at), all frozen at
+%%         accept, which is exactly why the diagram gains no response column.
+%%     U43 cleanup (worker ticker, 500 per batch, 1 minute, max 5 batches per tick) is a job, served by the
+%%         existing idx_idem_expiry; no new index and no new entity.
+%%     U44 is the one real DDL change of the revision, and it is a TRIGGER, not a column: a deferred
+%%         constraint trigger on idempotency_records (INSERT and UPDATE) makes "a committed row never has a
+%%         NULL event_id" a database property. The event_id attribute line below therefore keeps its
+%%         nullable type - the NULL window is what U4 claim-first ordering bought - and its note now points
+%%         at the guard. U1 (UUID generation) stays open and is not decided by this.
+%%     U45 keeps latest-wins semantics and rejects both a history table and a per-conflict audit_logs row,
+%%         so no 14th table appears here and the audit_logs block is unchanged.
+%%   U46 was re-verified, unchanged. U47 (JCS parser, four requirements) and U48 (decimal precision) stay
+%%   OPEN. See overview.md sections 5.5, 13 and 14, and database-schema.md sections 4.13 and 4.13.6.
+%%
+%% Revision 11 is an EVALUATION turn: it approves nothing and changes nothing here.
+%%   U47 (JCS parser/canonicalizer choice) and U48 (decimal precision beyond the double round-trip) were
+%%   evaluated and written up as "Proposed - Pending Owner Approval" in overview.md section 15; both stay
+%%   open rows in the section 13 register, which is still 31 rows over 17 approvals.
+%%   Why this diagram is untouched, stated positively rather than as an omission:
+%%     U48 is about which JSON *values* the API accepts and how a value serializes under RFC 8785. Option B
+%%         (the recommendation) rejects nothing new and stores nothing new; the digit-cap variant would add one
+%%         more 400 code at the boundary. Neither has a column, so neither has a shape here.
+%%     U47 is a dependency-selection question. Its headline finding is that no candidate implements U46's
+%%         numeric rules, so the literal-level validation pass is application code either way - again no shape.
+%%     The B'-observe guardrail is a metric counter, not a field: explicitly NOT a 14th table, not a column on
+%%         idempotency_records, and not a response member.
+%%   Counts are therefore unchanged and verified as such: 13 entity blocks, 17 relationship lines
+%%   (14 agreed + 2 approved with U4 + 3 optional U12), 152 attribute lines. request_hash stays bytea under its
+%%   32-byte CHECK, hash_algorithm stays pinned to sha256, payload stays jsonb holding the accepted document,
+%%   and the U44 trigger note on idempotency_records.event_id still points at the only DDL object of revision 10.
+%%   Nothing here presumes an answer for the still-open U1, U3 or U6 either.
+%%
+%% Revision 12 is a CORRECTION pass on revision 11's numeric analysis. It still approves nothing and it still
+%%   changes nothing in this diagram - but the reason it changes nothing is now sharper than "no schema shape":
+%%     U46 rule 1 binds a number's MATHEMATICAL VALUE, so 1.7e308, 1E30 and 9223372036854775807 are integers
+%%       written in exponent notation and are REJECTED. Revision 11 accepted 1.7e308 by treating the presence of
+%%       a '.' or 'e' as evidence of a fractional value; that was an error about arithmetic, not about the model,
+%%       and no column, CHECK or index expresses it either way (jsonb stores whatever the API accepts).
+%%     Guard G1 (proposed, necessary): a fractional literal can still land on an unsafe integer after the
+%%       binary64 conversion that RFC 8785 mandates - 9007199254740992.5 canonicalizes to 9007199254740992 with
+%%       no error reported by the library (measured in revision 12 against Go 1.27.3 stdlib encoding/json/jsontext).
+%%       The guard is a validation-order rule in application code, so again no shape here.
+%%     Guard G2 (proposed, optional): accept a literal only when its canonical text denotes the same decimal
+%%       value; also a boundary rule, not a column. The ">15 significant digits" framing is withdrawn.
+%%     RFC 8785 has no section 16; the conformance material is Appendix B Table 1, sections 3.2.2, 3.2.3 and
+%%       Appendix I. A citation fix, not a design change.
+%%   Counts verified unchanged again: 13 entity blocks, 17 relationship lines (14 agreed + 2 approved with U4 +
+%%   3 optional U12), 152 attribute lines. request_hash stays bytea with its 32-byte CHECK, event_id keeps its
+%%   U44 trigger note, payload stays jsonb. U47 and U48 remain open rows in the overview section 13 register.
+%%
+%% Revision 13 is the FINAL evaluation pass before the owner's approval round. It approves nothing and, like the
+%%   two revisions before it, adds no entity, attribute or relationship - but three of its statements are the ones
+%%   a reader is most likely to want while looking at this diagram:
+%%     U48's guard set narrowed to G1 ONLY. G1 = reject after the binary64 conversion when abs(f) reaches 2^53;
+%%       revision 12 also required the double to be integral, which is redundant (every binary64 at or above
+%%       2^53 is an integer). G2 - accept a literal only when its canonical text denotes the same decimal value -
+%%       is documented but DEFERRED, not recommended, so no new 400 code appears anywhere and the residual
+%%       inexactness is a counter, not a column. Validation order is application code; nothing here changes.
+%%     The integrality test that decides U46 rule 1 was corrected. Revision 12 asked "is exponent >= digits-1"
+%%       on a 0.d1..dk form, which misread trailing zeros: 1.200e1 IS the integer 12. The corrected rule is
+%%       value = D x 10^p (trailing zeros kept), integral iff p >= 0 or trailing_zeros(D) >= -p. Arithmetic, not
+%%       schema - jsonb accepts whatever the API validates, so the ERD cannot show the difference.
+%%     U47 was decided as a COMPARISON, not a guess: the Go 1.27.3 standard library package encoding/json/jsontext
+%%       and github.com/goccy/go-json/jsontext v0.12.0 were both executed against the RFC 8785 conformance
+%%       material (the 3.2.2/3.2.4 golden document, the 3.2.3 UTF-16 ordering vector, all of Appendix B Table 1,
+%%       duplicates, raw literals, overflow/underflow, surrogates, escapes, hostile sizes) and agreed byte for
+%%       byte. Recommendation: the standard library, conditional on pinning the toolchain (overview 15.6 proposes
+%%       Go 1.27.4 under U30). A dependency/toolchain question with zero DDL consequence.
+%%   Counts re-verified after this pass: 13 entity blocks, 17 relationship lines, 152 attribute lines.
+%%   Still open by instruction: U1, U3, U6; still proposed: U30 (toolchain half), U47, U48.
+%%   Mermaid rendering was NOT verified - no renderer is available in this environment; the file is checked
+%%   structurally (block/line counts and attribute-line grammar) instead.
+%%
+%% Revision 14 is the owner's APPROVAL ROUND. It approves a defined set and, like revisions 11-13, adds no entity,
+%%   no attribute and no relationship - but it does change one attribute NOTE (events.payload, below), because the
+%%   owner approved a payload type rule that a reader looking at this table must see. Recorded in overview 11 items
+%%   25-32 and database-schema.md 4.7, 4.13.5, 4.13.7 and 9:
+%%     U30 (toolchain half only) APPROVED: baseline go1.27.4. U30 as a whole is NOT closed - the linter set,
+%%       complexity budgets, golangci-lint compatibility with this baseline, depguard/importas and Actions versions
+%%       stay open in overview 13. No go.mod, workflow or container file exists, so the pin is documentation only.
+%%     U47 APPROVED: path A, the standard-library encoding/json/jsontext. github.com/goccy/go-json is NOT adopted
+%%       and no JSON dependency is added anywhere; nothing in this diagram depends on a module.
+%%     U48 APPROVED as Option B, with guard G1 approved and guard G2 DEFERRED (not implemented, not required in V1).
+%%       G1 = after the binary64 conversion reject when abs(f) reaches 2^53, reported with the existing
+%%       integer_out_of_safe_range code; G2 would have added number_not_exactly_representable and did not. So the
+%%       400 code list is unchanged, and U41's formula and U46's five rules are re-verified UNCHANGED.
+%%     PAYLOAD TYPE APPROVED: the request document and payload must both be JSON objects; an array, string, number,
+%%       boolean or null payload is 400 invalid_json_document before the claim, and unrecognised members inside
+%%       payload are accepted (no member name is reserved). jsonb cannot express this - it stores any JSON value -
+%%       so the rule lives at the API boundary and the payload note below is the only reflection here. This closed
+%%       the contradiction between overview 5.1 and 15.5 in one direction across all three documents.
+%%     hookflow_ingest_number_inexact_total APPROVED by name as an observability counter: not a column, not a
+%%       table, not a response member, and it carries NO numeric threshold in the API contract (none was invented;
+%%       alerting belongs to operational configuration).
+%%     Overview 15.3's eight-step parse order APPROVED as normative, with its order and transaction boundaries
+%%       preserved: every 400 before the claim, the digest before BEGIN, the claim-first transaction unchanged.
+%%     Conformance gate APPROVED as a merge requirement (RFC 8785 vectors, Appendix B, Appendix I sample values, V8
+%%       cross-checks, fuzzing, boundary cases, in CI against the pinned implementation). EVIDENCE HONESTY: what ran
+%%       ran on go1.27.3 outside the repository; the Appendix I file, V8, fuzzing and every go1.27.4 run are PENDING,
+%%       so the suite has not passed and no implementation or runtime verification is claimed.
+%%   Register handling, corrected in this round: the U47 and U48 rows are KEPT in overview 13 and marked APPROVED
+%%     (revision 14) rather than deleted - an approved decision stays in the register as part of the historical
+%%     record. The table is therefore 31 rows: 29 still open plus those 2 approved ones. U30 remains an open row with
+%%     only its go1.27.4 toolchain half approved, and G2 stays DEFERRED (not approved) everywhere it appears.
+%%   Still open by instruction: U1, U3, U6; still open by choice: U17 (no maximum payload size is written down
+%%   anywhere) and U30's lint/CI half. Counts re-verified after this round: 13 entity blocks, 17 relationship lines,
+%%   152 attribute lines - only one attribute NOTE changed its text, no line was added or removed.
+%%   Mermaid rendering was NOT verified in this revision either; no renderer is available here.
+%%
+%% Revision 15 DOCUMENTED one decision, U1 the UUID generation strategy, and presented it as the owner's approval -
+%%   it was not one: no owner approval had been given at that time. The owner approved U1 in revision 16 (overview 11
+%%   item 34; the correction record is overview 12.15), so the six parts below stand as the approved strategy while the
+%%   approval is attributed to revision 16. Like revisions 11-14 it
+%%   adds no entity, no attribute line, no relationship and no key. What is approved (recorded in overview 11 item 33,
+%%   approved in item 34), in six
+%%   parts, is recorded here because every PK in this diagram is an identifier and the reader should know where the
+%%   values come from:
+%%     1. UUIDv7 for EVERY entity id, including the ones that leave the system: events.id is the event_id in the 202
+%%        body, and deliveries.id is the X-HookFlow-Delivery-Id consumers dedupe on. Both stay uuid.
+%%     2. Generated by the GO APPLICATION LAYER before the INSERT. No uuid column here has, or may have, a database
+%%        DEFAULT - no gen_random_uuid(), no native uuidv7(), no trigger and no sequence behind an id. That is why
+%%        this revision changes no DDL: the defaults were never in the design in the first place.
+%%     3. ONE strategy shared by api, worker and outbox-publisher, so delivery_attempts.id and the NEW
+%%        outbox_messages row that each retry step inserts are built exactly the way events.id is. Each row keeps the
+%%        id it was created with: re-publishing or re-driving claims the existing row and UPDATEs its status, attempts
+%%        and lease columns, and nothing in this design rewrites a row's own id (database-schema.md 4.10 and
+%%        consequence 25). idempotency_records.event_id is a link to another row's key, not a key of its own, and the
+%%        UPDATE that fills it in 5.1 step d is what U44's deferred trigger checks - a different thing entirely.
+%%     4. The APPROXIMATE CREATION TIME a v7 value carries is ACCEPTED. An identifier is not an authorization
+%%        credential: tenant isolation is the organization_id invariant and the "org+id target" unique keys below
+%%        (section 3.1 of database-schema.md), plus API scopes - never the id's order, age or guessability.
+%%     5. Business ordering and scheduling stay on the TIMESTAMP columns - received_at, created_at, next_attempt_at,
+%%        available_at, expires_at. No relationship, index or scan uses an id as a business ordering key. A
+%%        deterministic tie-breaker such as outbox_messages' (available_at, id) uses the id only after the timestamp
+%%        and is not business ordering.
+%%        Nothing here claims monotonicity either: RFC 9562 section 5.7 fills the 74 bits after the timestamp with
+%%        random data by default and makes the counter and sub-millisecond sub-fields an optional MAY, so two ids from
+%%        one generator inside one millisecond have no guaranteed relative order. No attribute, index or test in this
+%%        design may depend on that order, and this round removed the monotonicity expectation that an earlier draft of
+%%        overview 10 had written: with no library selected (part 6), monotonicity is a property to be read off a real
+%%        implementation later, never a rule this diagram can assert.
+%%     6. NO LIBRARY AND NO VERSION is chosen by this decision. Naming a uuid package or a dependency is a separate
+%%        act that belongs with the open tooling and dependency questions; no go.mod exists, so nothing is named.
+%%   What revision 15 did NOT decide, stated so nobody reads it in: U3 PostgreSQL version (the native uuidv7()
+%%   alternative was declined for U1, which is not a PostgreSQL vote); U6 secret handling; U17 payload size; U20
+%%   audit_logs primary key type - that row keeps its bigserial alternative, and U1 applies to it only if U20 leaves
+%%   it a uuid; and U30's lint/CI half. G2 stays DEFERRED and U30 stays half approved, both unchanged.
+%%   U44 is the interesting adjacency and it is UNCHANGED: idempotency_records.event_id stays nullable in this diagram
+%%   with its deferred constraint trigger note. U1 landing application-side satisfies the precondition that note
+%%   recorded for a possible later switch to NOT NULL; neither revision 15 nor revision 16 applies that switch, and
+%%   overview 13 lists
+%%   it as an open item.
+%%   Register: still 31 rows in overview 13, 28 open plus 3 approved and retained (U1, U47, U48), 20 approved IDs,
+%%   section 11 ending at item 33 as revision 15 left it - revision 16 adds item 34 as the approval and relabels U1's
+%%   row Approved (revision 16) without changing any of those totals. Counts re-verified after this round: 13 entity blocks, 17 relationship lines,
+%%   152 attribute lines - UNCHANGED, and this revision edited comment lines only.
+%%   Mermaid rendering was NOT verified in this revision either; no renderer is available here.
+%%
+%% Revision 16 is the owner's approval of ONE decision - U1, the UUID generation strategy - together with the
+%%   correction of revision 15's record of it. It adds no entity, no attribute line, no relationship, no key and no
+%%   change to any note:
+%%     1. APPROVED, exactly as revision 15 documented it and unchanged in substance: application-generated UUIDv7 for
+%%        every entity id, produced before the INSERT, with no database DEFAULT anywhere, and with native uuidv7()
+%%        NOT used for id generation; one strategy across api, worker and outbox-publisher; the approximate creation
+%%        time accepted; an identifier never an authorization control; ordering and scheduling from timestamp columns
+%%        only; no library and no version named.
+%%     2. CORRECTION, so the diagram cannot mislead: revision 15 labelled this approved when the owner had not
+%%        approved it. That claim was premature and is not represented as a valid approval. U1 is Approved now,
+%%        effective from revision 16 - neither open nor rescinded - and revision 15's block above stays as the record of
+%%        what that round wrote rather than being rewritten.
+%%     3. STORAGE IS UNCHANGED BY THE DECISION, which is what keeps U3 independently decidable: every id column stays
+%%        uuid - 16 bytes, RFC 4122 lowercase hyphenated text form, the same representation for v4 and v7 values, and
+%%        no index, comparison, foreign key or jsonb behaviour consults the version nibble. This decision couples id
+%%        generation to no PostgreSQL feature and to no SQL parser or catalog capability, and it votes on neither.
+%%     4. UNCHANGED IN STATUS AND STILL OPEN: U3 PostgreSQL version - the only movement there is a wording fix inside
+%%        this same revision, removing the obsolete claim from its register rationale that the PostgreSQL version
+%%        drives UUID generation, which selects no version and recommends nothing; U6 secret handling (envelope, key custody, AAD,
+%%        copy-vs-pointer - historical wording said AAD used the canonical lowercase UUID text of the stored uuid values;
+%%        that is retained as history and superseded for current guidance by the proposed 64-byte binary AAD in
+%%        d6-u25-decision-proposal.md section 4.3; OWNER APPROVED as D6-B 2026-11-24 and implemented in the
+%%        development runtime, with production custody not implemented); U8, U17, U20, U25, U30's
+%%        lint/CI half, U34, U35. No new decision id is created here and none is approved by implication.
+%%     5. NOT AN AUTHORIZATION TO IMPLEMENT: no Go source, SQL, migration, go.mod, container file, workflow or script
+%%        was created or modified, nothing is staged, committed or pushed, and no PostgreSQL UUID function was executed
+%%        to confirm a claim - the compatibility statements above are documentation-level, not test results.
+%%   Counts after revision 16: 13 entity blocks, 17 relationship lines, 152 attribute lines; register still 31 rows =
+%%   28 open + 3 approved and retained; 20 approved IDs; overview section 11 ends at item 34. Comment lines only;
+%%   Mermaid rendering was NOT verified, as in every earlier round - no renderer is available here.
+%%
+%% 2026-11-22 OWNER APPROVAL ALIGNMENT (A1-A10, B1-B6) - no revision number is created.
+%%   Full record: overview.md section 12.16. The section 13 register is the unmodified revision 16
+%%   register; this block records approvals and does not rewrite any status there.
+%%   Relationship lines: ONLY the three U12 provenance lines at the end are newly approved (by A10).
+%%   The first 14 lines keep exactly the status they already had; nothing here claims all 17 are approved.
+%%   deliveries (A1/A2/A4): + dispatch_seq, + dispatch_lease_token, + dispatch_lease_expires_at;
+%%     state loses cancelled; completed_at is terminal-only.
+%%   delivery_attempts (A4): outcome is completion-only success/retryable_failure/terminal_failure;
+%%     finished_at is NOT NULL; no row exists at claim or start.
+%%   outbox_messages (A2/B1): + sequence with UNIQUE (delivery_id, sequence); + lease_token;
+%%     kind loses delivery.cancel; attempts is a per-cycle claim count; available_at has no default
+%%     and is a derived relay gate; locked_at is a persisted lease start, not a row lock.
+%%   Counts after this alignment: 13 entity blocks, 17 relationship lines, 157 attribute lines
+%%     (152 before: +3 on deliveries, +2 on outbox_messages). Mermaid rendering was NOT verified.
+%%
+%% 2026-11-23 OWNER DECISIONS (F3-A, F3-B, F3-C, F8) - overview §12.17, no revision number.
+%%   F3-A users -> api_keys: keep the single-column created_by_user_id / revoked_by_user_id FKs with
+%%     SET NULL; users is global (no organization_id), so membership is validated by the application.
+%%   F3-B api_keys -> events: composite (organization_id, api_key_id) -> api_keys (organization_id, id),
+%%     ON DELETE SET NULL (api_key_id), preserving events.organization_id.
+%%   F3-C endpoint_subscriptions -> deliveries: composite (organization_id, endpoint_subscription_id)
+%%     -> endpoint_subscriptions (organization_id, id), ON DELETE SET NULL (endpoint_subscription_id).
+%%     url/http_headers/secret_encrypted stay immutable; the pointer is nullable and may be cleared.
+%%   F8 outbox_messages.lease_token: uq_outbox_lease_token UNIQUE (lease_token), NULLS DISTINCT.
+%%   Counts unchanged: 13 entity blocks, 17 relationship lines, 157 attribute lines.
+%%
+%% 2026-11-23 OWNER DECISION - Recovery event expiry takes precedence over an active worker lease
+%%   (overview §12.18; no revision number, no decision ID, and no entity, attribute or relationship change).
+%%   Recovery Sweep may set deliveries.state='expired' when events.expires_at has passed, even while
+%%   dispatch_lease_token / dispatch_lease_expires_at are still set. That transition clears the worker
+%%   lease pair, creates no delivery_attempts row, does not change attempt_count or dispatch_seq, and
+%%   creates no retry outbox_messages row. A later Complete with the stale claim is fenced and cannot
+%%   revive the delivery. Where the Sweep has not transitioned the delivery, B3 late-lease completion
+%%   applies unchanged.
+%%
+%% Revision 17 (documentation-only): no entity block, attribute line, relationship line, key or note
+%%   changed. The 13 paired migration files exist in db/migrations/ and were applied to PostgreSQL 18.7
+%%   (schema version 13); implementation status is in overview §16 and database-schema.md §7.
+%%   Mermaid rendering was still NOT verified, as in every earlier round.
+%%
+%% Reading the attribute lines:
+%%   type name [PK|FK|UK] "notes"
+%%   NOT NULL and CHECK detail lives in database-schema.md section 4; the note here is a pointer.
+%%   "org+id target" marks the UNIQUE (organization_id, id) keys that exist so child tables can
+%%   declare a composite same-organization foreign key.
+%%
+%% Relationship lines below: the first 14 are the AGREED relationships - 12 from the original schema
+%% plus the 2 idempotency edges approved with U4. Their status is unchanged by the 2026-11-22 alignment.
+%% The last 3 are the U12 provenance columns, adopted and approved by A10 (2026-11-22); they are labelled
+%% "U12 approved by A10" and carry their F3-A/F3-B/F3-C resolution (2026-11-23). No other relationship
+%% line is newly approved.
+%%
+%% Names that must not reappear: subscriptions, subscription_destinations, outbox_events,
+%% destinations_snapshot, and the events.status column (removed by U36 - do not reintroduce it).
+%% Also gone since U4: events.idempotency_key and events.dedupe_hash, which now live in
+%% idempotency_records as idempotency_key and request_hash.
+
+erDiagram
+    users ||--o{ organization_members : "agreed many to many"
+    organizations ||--o{ organization_members : "agreed many to many"
+    organizations ||--o{ api_keys : "agreed one to many"
+    organizations ||--o{ endpoints : "agreed one to many, soft deletable"
+    organizations ||--o{ events : "agreed one to many"
+    organizations ||--o{ organization_subscriptions : "agreed commercial plan record"
+    organizations ||--o{ audit_logs : "agreed one to many"
+    endpoints ||--o{ endpoint_subscriptions : "agreed routing rules"
+    events ||--o{ deliveries : "agreed one to many"
+    endpoints ||--o{ deliveries : "agreed one to many"
+    deliveries ||--o{ delivery_attempts : "agreed one to many"
+    deliveries ||--o{ outbox_messages : "agreed one to many, not one to one"
+    organizations ||--o{ idempotency_records : "approved with U4, key scoped to org"
+    events |o--o{ idempotency_records : "approved with U4, nullable event link"
+    users |o--o{ api_keys : "U12 approved by A10, creator; F3-A single-column SET NULL"
+    api_keys |o--o{ events : "U12 approved by A10, provenance; F3-B composite SET NULL"
+    endpoint_subscriptions |o--o{ deliveries : "U12 approved by A10, rule that matched; F3-C composite SET NULL"
+
+    users {
+        uuid id PK
+        text email "not null, unique on lower email"
+        text name "not null, max 100"
+        text password_hash "null means no local password"
+        timestamptz password_updated_at
+        text status "not null, invited active disabled"
+        boolean mfa_enabled "not null default false"
+        timestamptz last_login_at
+        timestamptz created_at "not null"
+        timestamptz updated_at "not null"
+    }
+
+    organizations {
+        uuid id PK "org+id target; also the U38 FOR NO KEY UPDATE lock anchor for the endpoint count"
+        text name "not null"
+        jsonb settings "not null, per tenant preferences"
+        text status "not null, active suspended archived"
+        timestamptz created_at "not null"
+        timestamptz updated_at "not null"
+    }
+
+    organization_members {
+        uuid id PK
+        uuid organization_id "FK not null, cascade, org+id target"
+        uuid user_id "FK not null, cascade"
+        text role "not null, owner admin member viewer"
+        uuid invited_by "FK nullable, set null"
+        timestamptz joined_at "not null"
+        timestamptz created_at "not null"
+        timestamptz updated_at "not null"
+    }
+
+    api_keys {
+        uuid id PK
+        uuid organization_id "FK not null, cascade, org+id target"
+        text name "not null, unique per org while live"
+        text key_prefix "not null, unique, non secret lookup fragment"
+        text secret_hash "not null, HASHED, never recoverable"
+        text hash_algorithm "not null default argon2id"
+        text scopes_array "text array, not null"
+        timestamptz last_used_at
+        timestamptz expires_at
+        timestamptz revoked_at "null means live"
+        uuid created_by_user_id "FK nullable, set null, U12 provenance adopted by A10"
+        uuid revoked_by_user_id "FK nullable, U12 provenance adopted by A10"
+        timestamptz created_at "not null"
+        timestamptz updated_at "not null"
+    }
+
+    endpoints {
+        uuid id PK
+        uuid organization_id "FK not null, cascade, org+id target"
+        text name "not null, unique per org where live"
+        text description "nullable, max 500"
+        text url "not null, https only CHECK"
+        text secret_encrypted "not null, REVERSIBLE ciphertext of the signing secret; envelope/key-version format open (U6), copy-to-delivery per A8"
+        text signing_scheme "not null default hmac_sha256"
+        jsonb http_headers "not null"
+        text status "not null, active paused"
+        integer timeout_ms "not null, 250 to 30000"
+        integer max_attempts "null means org default"
+        timestamptz last_success_at
+        timestamptz last_failure_at
+        timestamptz created_at "not null"
+        timestamptz updated_at "not null"
+        timestamptz deleted_at "SOFT DELETE MARKER, null means live"
+    }
+
+    endpoint_subscriptions {
+        uuid id PK "recorded in the snapshot as endpoint_subscription_id"
+        uuid organization_id "FK not null, cascade, redundant by design"
+        uuid endpoint_id "not null, composite FK to endpoints org id, CASCADE"
+        text event_type "not null, UNIQUE with endpoint_id, EXACT MATCH ONLY no wildcards, U16 approved"
+        boolean is_active "not null default true, retained as the routing-rule toggle, A10"
+        timestamptz created_at "not null, append only join"
+    }
+
+    events {
+        uuid id PK
+        uuid organization_id "FK not null, cascade, org+id target"
+        text type "not null, lowercase dotted"
+        jsonb payload "not null, must be a JSON object (rev 14), size cap U17 still unset, value domain fixed by U46 plus guard G1 - see schema 4.7"
+        integer destination_count "not null default 0, CHECK non negative, KEPT per U36; 0 means no endpoint matched and the event is still accepted"
+        jsonb headers "allowlisted, credential free"
+        uuid api_key_id "nullable, composite FK to api_keys org+id, SET NULL (api_key_id), F3-B provenance"
+        inet source_ip
+        timestamptz occurred_at "caller event time"
+        timestamptz received_at "not null, retention clock"
+        timestamptz expires_at "not null, end of delivery window"
+        timestamptz created_at "not null"
+        timestamptz updated_at "not null"
+    }
+
+    deliveries {
+        uuid id PK "sent as X HookFlow Delivery Id"
+        uuid organization_id "FK not null, cascade, org+id target"
+        uuid event_id "not null, composite FK to events org id, CASCADE"
+        uuid endpoint_id "not null, composite FK to endpoints org id, RESTRICT"
+        uuid endpoint_subscription_id "nullable provenance pointer, composite FK to endpoint_subscriptions org+id, SET NULL (endpoint_subscription_id), F3-C; snapshot payload unchanged"
+        text url "not null, SNAPSHOT COLUMN, destination URL as accepted, U33"
+        jsonb http_headers "not null, SNAPSHOT COLUMN, headers as accepted, U33"
+        text secret_encrypted "not null, SNAPSHOT COLUMN, encrypted secret as accepted, U33, copy-to-delivery per A8"
+        text state "not null, pending retrying succeeded failed expired, SOURCE OF TRUTH for processing state per U36"
+        integer dispatch_seq "not null, CHECK >= 1, initial 1 incremented per retry, no default, A2"
+        integer attempt_count "not null"
+        timestamptz next_attempt_at "business due-time authority, NULL once terminal; available_at is a derived relay gate, U8 and A3"
+        timestamptz last_attempt_at
+        integer last_response_status
+        text last_error "truncated and scrubbed"
+        smallint priority "not null default 0"
+        timestamptz created_at "not null, retention clock"
+        timestamptz updated_at "not null"
+        timestamptz completed_at "not null only in terminal state"
+        uuid dispatch_lease_token "nullable, C-2 worker fence, not an entity id, A1"
+        timestamptz dispatch_lease_expires_at "nullable, paired with the token, no default, A1"
+    }
+
+    delivery_attempts {
+        uuid id PK
+        uuid organization_id "FK not null, cascade"
+        uuid delivery_id "not null, composite FK to deliveries org id, CASCADE"
+        integer attempt_number "not null, UNIQUE with delivery_id"
+        text request_method "not null default POST"
+        text request_url "not null"
+        jsonb request_headers "not null, secrets redacted"
+        integer response_status
+        jsonb response_headers "Retry-After preserved"
+        text response_body_snippet "truncated"
+        text outcome "not null, completion only, success retryable_failure terminal_failure, A4"
+        text error_class "timeout connect tls dns http_status internal"
+        text error_message "truncated"
+        integer duration_ms
+        timestamptz started_at "not null, observed start supplied explicitly, retention clock"
+        timestamptz finished_at "not null, completion time, A4"
+    }
+
+    outbox_messages {
+        uuid id PK
+        uuid organization_id "FK not null, cascade"
+        uuid delivery_id "not null, composite FK to deliveries org id, no unique constraint; UNIQUE (delivery_id, sequence) governs retry identity"
+        integer sequence "not null, CHECK >= 1, no default, matches deliveries.dispatch_seq, A2"
+        text kind "not null, delivery dispatch, delivery retry"
+        text topic "not null, amqp routing target"
+        jsonb payload "not null, dispatch intent not body"
+        jsonb headers
+        text status "not null, pending publishing published failed"
+        integer attempts "not null, per-cycle claim count, T1 increments, Sweep re-arm resets, B1"
+        timestamptz available_at "not null, no default, derived relay gate by the A3 formulas"
+        timestamptz locked_at "persisted publisher lease start; expiry = locked_at + configured L, B1"
+        text locked_by "publisher instance id"
+        uuid lease_token "nullable, fresh per-claim fence, cleared on leaving publishing, unique uq_outbox_lease_token, B1/F8"
+        timestamptz published_at
+        text last_error "truncated"
+        timestamptz created_at "not null"
+        timestamptz updated_at "not null"
+    }
+
+    organization_subscriptions {
+        uuid id PK
+        uuid organization_id "FK not null, cascade, org+id target"
+        text plan "not null, free pro enterprise, NOT on organizations"
+        text status "not null, trialing active past_due canceled incomplete"
+        timestamptz current_period_start
+        timestamptz current_period_end "must be after period start"
+        timestamptz trial_ends_at
+        timestamptz canceled_at
+        timestamptz created_at "not null"
+        timestamptz updated_at "not null"
+    }
+
+    audit_logs {
+        uuid id PK "application-generated UUIDv7, no DEFAULT (A9); the U20 register row is unchanged"
+        uuid organization_id "FK not null, CASCADE, per agreed one to many; organization-scoped rows only in V1, U9 and A9"
+        text actor_type "not null, user api_key system service"
+        uuid actor_id "polymorphic, intentionally no FK"
+        text action "not null, endpoint created style"
+        text target_type
+        uuid target_id
+        inet ip
+        text user_agent
+        jsonb metadata "not null, never secrets or payloads"
+        timestamptz occurred_at "not null, append only table"
+    }
+
+    idempotency_records {
+        uuid id PK
+        uuid organization_id "FK not null, cascade, the scope of the key per U4"
+        text idempotency_key "not null, UNIQUE with organization_id, REQUIRED header value"
+        bytea request_hash "not null, exactly 32 bytes, SHA-256 of the RFC 8785 JCS form of event_type plus payload, U41 approved"
+        text hash_algorithm "not null default sha256, pinned to that one value by chk_idem_hash_alg, U41"
+        uuid event_id "nullable only in flight, never NULL committed - trg_idem_linked, composite FK to events org id CASCADE, U44 approved"
+        timestamptz created_at "not null, start of the 72 hour window"
+        timestamptz expires_at "not null after created_at, key reusable once passed regardless of cleanup, swept by worker, U4 and U43 approved"
+    }

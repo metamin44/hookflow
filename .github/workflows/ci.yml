@@ -1,0 +1,225 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Format, vet, build, unit, modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.27.4"
+          cache-dependency-path: go.sum
+      - name: Check gofmt
+        run: |
+          files="$(gofmt -l .)"
+          if [ -n "$files" ]; then
+            printf '%s\n' "$files"
+            exit 1
+          fi
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
+      - name: Unit tests
+        run: go test ./... -count=1
+      - name: Verify modules
+        run: go mod verify
+      - name: Check module tidiness without modifying files
+        run: go mod tidy -diff
+
+  jcs-conformance:
+    name: JCS conformance (RFC 8785)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.27.4"
+          cache-dependency-path: go.sum
+      - name: Verify conformance fixtures and reference runtime
+        run: |
+          # Fails closed: every fixture and the Node.js runtime are required.
+          node --version
+          test -f internal/platform/jcs/testdata/rfc8785/section-3.2.2-input.json
+          test -f internal/platform/jcs/testdata/rfc8785/section-3.2.2-canonical.json
+          test -f internal/platform/jcs/testdata/rfc8785/utf16-order-input.json
+          test -f internal/platform/jcs/testdata/rfc8785/utf16-order-canonical.json
+          test -f internal/platform/jcs/testdata/rfc8785/appendix-b-numbers.tsv
+          test -f internal/platform/jcs/testdata/v8/serialize.mjs
+      - name: Unit and RFC fixture suite
+        run: go test ./internal/platform/jcs -count=1 -v
+      - name: V8 and Appendix A reference comparison
+        run: go test -tags=v8conf ./internal/platform/jcs -run 'TestV8Conformance' -count=1 -v
+      - name: Bounded fuzz Canonicalize (60s)
+        run: |
+          # Deterministic budget: 60 seconds of fuzzing on the commit under
+          # test. A missing fuzz target fails go test; zero executed cases fail
+          # the parser gate below, so neither can be reported as success.
+          set -o pipefail
+          go test -json -run='^$' -fuzz='^FuzzCanonicalize$' -fuzztime=60s ./internal/platform/jcs \
+            | tee "$RUNNER_TEMP/hookflow-fuzz.jsonl"
+          python3 - "$RUNNER_TEMP/hookflow-fuzz.jsonl" <<'PY'
+          import json
+          import re
+          import sys
+          execs = 0
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              for line in stream:
+                  try:
+                      row = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  if row.get("Action") != "output":
+                      continue
+                  for count in re.findall(r"execs:\s*(\d+)", row.get("Output", "")):
+                      execs = max(execs, int(count))
+          if execs == 0:
+              print("Fuzz gate executed zero fuzz cases")
+              sys.exit(1)
+          print("Fuzz gate executed at least", execs, "cases")
+          PY
+      - name: Fuzz crasher diagnostics
+        if: failure()
+        run: |
+          if [ -d internal/platform/jcs/testdata/fuzz ]; then
+            find internal/platform/jcs/testdata/fuzz -type f -print -exec cat {} \;
+          fi
+
+  integration:
+    name: Integration (${{ matrix.rabbitmq }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rabbitmq: "4.4.1"
+            image: rabbitmq:4.4.1-management-alpine@sha256:2b47b1aa05ec7e373950ad2e9200e9f95a9da7039c8d22c19dbf5a59101362c4
+          - rabbitmq: "4.3.8"
+            image: rabbitmq:4.3.8-management-alpine@sha256:977a6cf07ea9065116aaa40e7dc147ad25621d71a654248d36d79e5e7500be3e
+    services:
+      postgres:
+        image: postgres:18-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
+        env:
+          POSTGRES_DB: hookflow_ci
+          POSTGRES_USER: hookflow
+          # Disposable credentials for the isolated CI service only.
+          POSTGRES_PASSWORD: hookflow-ci-postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hookflow -d hookflow_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      rabbitmq:
+        image: ${{ matrix.image }}
+        env:
+          RABBITMQ_DEFAULT_USER: hookflow
+          # Disposable credentials for the isolated CI service only.
+          RABBITMQ_DEFAULT_PASS: hookflow-ci-rabbitmq
+        ports:
+          - 5672:5672
+          - 15672:15672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 30
+    env:
+      HOOKFLOW_DB_NAME: hookflow_ci
+      HOOKFLOW_DB_USER: hookflow
+      HOOKFLOW_DB_PASSWORD: hookflow-ci-postgres
+      HOOKFLOW_DB_HOST: 127.0.0.1
+      HOOKFLOW_DB_PORT: "5432"
+      HOOKFLOW_DB_SSLMODE: disable
+      HOOKFLOW_RABBITMQ_URI: amqp://hookflow:hookflow-ci-rabbitmq@127.0.0.1:5672/%2F
+      HOOKFLOW_RABBITMQ_MANAGEMENT_URL: http://127.0.0.1:15672
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.27.4"
+          cache-dependency-path: go.sum
+      - name: Apply migrations
+        run: go run ./cmd/migrate up
+      - name: Integration tests (no skipped gates)
+        run: |
+          set -o pipefail
+          go test -json -tags=integration ./... -count=1 -p 1 | tee "$RUNNER_TEMP/hookflow-integration.jsonl"
+          python3 - "$RUNNER_TEMP/hookflow-integration.jsonl" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              # Package-level skip events without a Test name only mean "no test
+              # files"; a skipped test always carries a Test name and fails.
+              skipped = [
+                  row for line in stream
+                  if (row := json.loads(line)).get("Action") == "skip" and row.get("Test")
+              ]
+          if skipped:
+              for row in skipped:
+                  print("Required integration gate skipped:", row.get("Package"), row.get("Test", ""))
+              sys.exit(1)
+          PY
+      - name: Prove down and up migrations
+        run: |
+          go run ./cmd/migrate down 13
+          go run ./cmd/migrate up
+          go run ./cmd/migrate version
+
+  race:
+    name: Race detector
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.27.4"
+          cache-dependency-path: go.sum
+      - name: Race tests
+        run: go test -race ./... -count=1
+
+  lint:
+    name: golangci-lint (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.27.4"
+          cache-dependency-path: go.sum
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        continue-on-error: true
+        with:
+          version: v2.15.0

@@ -106,7 +106,11 @@ func TestParseRejections(t *testing.T) {
 		{"unsafe integer", `{"event_type":"a","payload":{"n":9007199254740992.5}}`, CodeIntegerOutOfSafeRange, ""},
 		{"unsafe integer literal", `{"event_type":"a","payload":{"n":295147905179352830000}}`, CodeIntegerOutOfSafeRange, ""},
 		{"overflow literal", `{"event_type":"a","payload":{"n":1e400}}`, CodeIntegerOutOfSafeRange, ""},
-		{"numeric before envelope", `{"event_type":"a","payload":{},"x":9007199254740993}`, CodeIntegerOutOfSafeRange, ""},
+		{"envelope before numeric", `{"event_type":"a","payload":{},"x":9007199254740993}`, CodeUnknownField, "x"},
+		{"event type before numeric", `{"event_type":"User.Created","payload":{"n":9007199254740993}}`, CodeInvalidEventType, "event_type"},
+		{"payload shape before numeric", `{"event_type":"a","payload":9007199254740993}`, CodeInvalidDocument, "payload"},
+		{"syntax before numeric", `{"event_type":"a","payload":{"n":9007199254740993},`, CodeInvalidDocument, ""},
+		{"duplicate before numeric", `{"event_type":"a","payload":{"n":9007199254740993,"n":1}}`, CodeDuplicateKey, ""},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

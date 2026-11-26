@@ -259,6 +259,19 @@ func TestNumericPolicyBoundaryLiterals(t *testing.T) {
 		{name: "negative unsafe integer", literal: "-9007199254740992", wantErr: ErrIntegerOutOfSafeRange},
 		{name: "negative zero", literal: "-0"},
 		{name: "negative zero fraction", literal: "-0.0"},
+		{name: "positive exponent leading zeros", literal: "1e0000000001"},
+		{name: "negative exponent leading zeros", literal: "1e-0000000001"},
+		{name: "positive exponent zero prefix only", literal: "1e0000000000"},
+		{name: "negative exponent zero prefix only", literal: "1e-0000000000"},
+		{name: "very long zero prefix", literal: "1e" + strings.Repeat("0", 10000) + "1"},
+		{name: "very long negative zero prefix", literal: "1e-" + strings.Repeat("0", 10000) + "1"},
+		{name: "zero with huge exponent", literal: "0e" + strings.Repeat("9", 10000)},
+		{name: "seven digit positive boundary", literal: "1e9999999", wantErr: ErrIntegerOutOfSafeRange},
+		{name: "seven digit negative boundary", literal: "1e-9999999", inexact: true},
+		{name: "eight digit positive exponent", literal: "1e12345678", wantErr: ErrIntegerOutOfSafeRange},
+		{name: "eight digit negative exponent", literal: "1e-12345678", inexact: true},
+		{name: "very long nonzero exponent", literal: "1e" + strings.Repeat("9", 10000), wantErr: ErrIntegerOutOfSafeRange},
+		{name: "very long nonzero negative exponent", literal: "1e-" + strings.Repeat("9", 10000), inexact: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -280,6 +293,25 @@ func TestNumericPolicyBoundaryLiterals(t *testing.T) {
 				t.Fatalf("InexactNumbers = %d, want 0", stats.InexactNumbers)
 			}
 		})
+	}
+}
+
+func TestExponentLeadingZerosCanonicalize(t *testing.T) {
+	for _, test := range []struct {
+		literal string
+		want    string
+	}{
+		{literal: "1e0000000001", want: "10"},
+		{literal: "1e-0000000001", want: "0.1"},
+		{literal: "1e" + strings.Repeat("0", 10000) + "2", want: "100"},
+	} {
+		canonical, err := Canonicalize([]byte(`{"n":` + test.literal + `}`))
+		if err != nil {
+			t.Fatalf("Canonicalize(%q): %v", test.literal, err)
+		}
+		if want := `{"n":` + test.want + `}`; string(canonical) != want {
+			t.Fatalf("Canonicalize(%q) = %s, want %s", test.literal, canonical, want)
+		}
 	}
 }
 

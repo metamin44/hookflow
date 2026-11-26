@@ -24,6 +24,7 @@ func TestManagementRejectsProhibitedDestinationsIntegration(t *testing.T) {
 		"ipv6 loopback":      "https://[::1]/hook",
 		"ipv6 unique local":  "https://[fd00::1]/hook",
 		"ipv6 link local":    "https://[fe80::1]/hook",
+		"ipv6 site local":    "https://[fec0::1]/hook",
 		"mapped ipv4":        "https://[::ffff:127.0.0.1]/hook",
 		"ipv6 zone":          "https://[fe80::1%25eth0]/hook",
 		"plain http":         "http://1.1.1.1/hook",

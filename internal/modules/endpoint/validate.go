@@ -140,7 +140,8 @@ func CanonicalHeaders(headers map[string]string) (map[string]string, *FieldError
 	}
 	canonical := make(map[string]string, len(headers))
 	total := 0
-	for name, value := range headers {
+	for _, name := range SortedHeaderNames(headers) {
+		value := headers[name]
 		if !validHeaderName(name) {
 			return nil, fieldError("http_headers", "invalid_headers", "header names must be RFC 7230 tokens")
 		}
@@ -154,8 +155,11 @@ func CanonicalHeaders(headers map[string]string) (map[string]string, *FieldError
 		if _, duplicate := canonical[lower]; duplicate {
 			return nil, fieldError("http_headers", "invalid_headers", "header names must be unique ignoring case")
 		}
-		if prohibitedHeader(lower) {
+		if CredentialBearingHeader(lower) {
 			return nil, fieldError("http_headers", "invalid_headers", "header name is not allowed")
+		}
+		if !SupportedCustomHeader(lower) {
+			return nil, fieldError("http_headers", "invalid_headers", "header name is not supported")
 		}
 		total += len(name) + len(value)
 		if total > MaxHeadersTotalLength {
@@ -213,47 +217,150 @@ func containsControl(value string) bool {
 	return false
 }
 
-var prohibited = map[string]struct{}{
-	"connection":          {},
-	"keep-alive":          {},
-	"proxy-authenticate":  {},
-	"proxy-authorization": {},
-	"te":                  {},
-	"trailer":             {},
-	"transfer-encoding":   {},
-	"upgrade":             {},
-	"proxy-connection":    {},
-	"content-length":      {},
-	"content-type":        {},
-	"content-encoding":    {},
-	"content-md5":         {},
-	"content-disposition": {},
-	"authorization":       {},
-	"cookie":              {},
-	"set-cookie":          {},
-	"www-authenticate":    {},
-	"x-api-key":           {},
-	"api-key":             {},
-	"forwarded":           {},
-	"x-forwarded":         {},
-	"x-forwarded-for":     {},
-	"x-forwarded-host":    {},
-	"x-forwarded-proto":   {},
-	"x-forwarded-port":    {},
-	"x-real-ip":           {},
-	"via":                 {},
-	"host":                {},
-	"expect":              {},
-	"webhook-id":          {},
-	"webhook-timestamp":   {},
-	"webhook-signature":   {},
+// supportedCustomHeaders is the complete set of user-configurable endpoint
+// header names. Application-managed content, transport, signature, routing and
+// diagnostic headers are deliberately absent.
+var supportedCustomHeaders = map[string]struct{}{
+	"x-tenant":            {},
+	"x-tenant-id":         {},
+	"x-trace-id":          {},
+	"x-event-version":     {},
+	"x-token-count":       {},
+	"x-tokenizer-version": {},
 }
 
-func prohibitedHeader(lower string) bool {
-	if _, denied := prohibited[lower]; denied {
+// SupportedCustomHeader reports whether name is explicitly supported for new
+// endpoint writes. Lookup is case-insensitive but separators are not rewritten.
+func SupportedCustomHeader(name string) bool {
+	if !validHeaderName(name) {
+		return false
+	}
+	_, ok := supportedCustomHeaders[strings.ToLower(name)]
+	return ok
+}
+
+// CredentialBearingHeader is the defense-in-depth classifier shared by write
+// validation, response redaction, snapshot creation and delivery execution.
+// It is deliberately segment-aware so benign metadata such as X-Token-Count,
+// X-Password-Expiry and X-Credential-Type is not rejected by substring matches.
+func CredentialBearingHeader(name string) bool {
+	segments := headerNameSegments(name)
+	return credentialHeaderSegments(segments) || compactCredentialHeader(segments)
+}
+
+func credentialHeaderSegments(segments []string) bool {
+	for i, segment := range segments {
+		terminal := i == len(segments)-1
+		next := ""
+		if !terminal {
+			next = segments[i+1]
+		}
+		switch segment {
+		case "authorization", "authentication", "auth", "bearer", "jwt",
+			"password", "passwd", "pwd", "cookie", "credential", "credentials", "secret", "token":
+			if terminal || !benignHeaderQualifier(next) {
+				return true
+			}
+		}
+		if !terminal && sensitiveHeaderPair(segment, next) {
+			after := ""
+			if i+2 < len(segments) {
+				after = segments[i+2]
+			}
+			if after == "" || !benignHeaderQualifier(after) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func compactCredentialHeader(segments []string) bool {
+	// Compact spellings such as XApiKey and XAuthToken have no segment
+	// boundary, so retain a narrow exact/suffix fallback after segment checks.
+	compact := strings.Join(segments, "")
+	switch compact {
+	case "xauth", "xauthentication", "xbearer", "xjwt":
 		return true
 	}
-	return strings.HasPrefix(lower, "x-hookflow-")
+	for _, suffix := range []string{
+		"authorization", "password", "passwd", "pwd", "cookie", "credential", "credentials",
+		"secret", "token", "apikey", "accesskey", "authkey", "privatekey", "secretkey",
+		"signingkey", "encryptionkey", "hmackey", "clientsecret",
+	} {
+		if strings.HasSuffix(compact, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func headerNameSegments(name string) []string {
+	var segments []string
+	var current strings.Builder
+	flush := func() {
+		if current.Len() > 0 {
+			segments = append(segments, current.String())
+			current.Reset()
+		}
+	}
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			current.WriteRune(r)
+			continue
+		}
+		flush()
+	}
+	flush()
+	return segments
+}
+
+func benignHeaderQualifier(segment string) bool {
+	switch segment {
+	case "count", "type", "expiry", "status", "version", "format", "length",
+		"enabled", "required", "policy", "rotation":
+		return true
+	default:
+		return false
+	}
+}
+
+func sensitiveHeaderPair(first, second string) bool {
+	if second == "key" {
+		switch first {
+		case "api", "access", "auth", "private", "secret", "signing", "encryption", "hmac":
+			return true
+		}
+	}
+	return first == "client" && second == "secret"
+}
+
+// SafeHeaders returns the deterministic public/snapshot form of historical
+// headers: supported names only, valid bounded values, no credential-bearing
+// names, and no ambiguous case-insensitive duplicates. The input is not mutated.
+func SafeHeaders(headers map[string]string) map[string]string {
+	safe := make(map[string]string, len(headers))
+	seen := make(map[string]struct{}, len(headers))
+	conflicted := make(map[string]struct{})
+	for _, name := range SortedHeaderNames(headers) {
+		lower := strings.ToLower(name)
+		if _, duplicate := seen[lower]; duplicate {
+			delete(safe, lower)
+			conflicted[lower] = struct{}{}
+			continue
+		}
+		seen[lower] = struct{}{}
+		if _, ambiguous := conflicted[lower]; ambiguous {
+			continue
+		}
+		value := headers[name]
+		if !SupportedCustomHeader(name) || CredentialBearingHeader(name) ||
+			len(value) > MaxHeaderValueLength || hasBadBytes(value) {
+			continue
+		}
+		safe[lower] = value
+	}
+	return safe
 }
 
 // ValidateCreateInput validates the full create document.

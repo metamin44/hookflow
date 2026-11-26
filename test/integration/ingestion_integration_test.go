@@ -4,10 +4,14 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,6 +34,7 @@ type ingestFixture struct {
 	t       *testing.T
 	pool    *pgxpool.Pool
 	service *eventapp.Service
+	metrics *observability.Metrics
 	orgs    []string
 }
 
@@ -58,14 +63,15 @@ func newIngestFixture(t *testing.T) *ingestFixture {
 			deliveriesCount, outboxCount)
 	}
 
+	metrics := observability.New()
 	service, err := eventapp.NewService(pool.Raw(), eventapp.Options{
-		Metrics: observability.New(),
+		Metrics: metrics,
 		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("construct ingestion service: %v", err)
 	}
-	f := &ingestFixture{t: t, pool: pool.Raw(), service: service}
+	f := &ingestFixture{t: t, pool: pool.Raw(), service: service, metrics: metrics}
 	t.Cleanup(f.cleanup)
 	return f
 }
@@ -167,7 +173,7 @@ func ingestBody(eventType string, payload string) []byte {
 func TestIngestionFreshClaimPersistsApprovedRows(t *testing.T) {
 	f := newIngestFixture(t)
 	org := f.createOrg("active")
-	endpoint := f.createEndpoint(org, "fresh", "active", `{"x-endpoint":"static"}`)
+	endpoint := f.createEndpoint(org, "fresh", "active", `{"x-tenant":"static"}`)
 	f.subscribe(org, endpoint, "order.created", true)
 
 	result := f.mustAccept(org, "fresh-key", ingestBody("order.created", `{"order":{"id":42}}`))
@@ -239,7 +245,7 @@ func TestIngestionFreshClaimPersistsApprovedRows(t *testing.T) {
 		&dispatchSeq, &attemptCount, &nextAttemptAt); err != nil {
 		t.Fatalf("read delivery snapshot: %v", err)
 	}
-	if snapshotURL != "https://example.test/fresh" || snapshotSecret != "cipher-fresh" || snapshotHeaders != `{"x-endpoint": "static"}` {
+	if snapshotURL != "https://example.test/fresh" || snapshotSecret != "cipher-fresh" || snapshotHeaders != `{"x-tenant": "static"}` {
 		t.Fatalf("snapshot = url %q headers %q secret %q", snapshotURL, snapshotHeaders, snapshotSecret)
 	}
 	if state != "pending" || dispatchSeq != 1 || attemptCount != 0 {
@@ -288,6 +294,53 @@ func TestIngestionFreshClaimPersistsApprovedRows(t *testing.T) {
 	}
 	if deliveries := f.count(`SELECT count(*) FROM deliveries WHERE event_id = $1::uuid`, result.EventID); deliveries != result.DestinationCount {
 		t.Errorf("destination_count %d != delivery rows %d", result.DestinationCount, deliveries)
+	}
+}
+
+func TestIngestionFiltersLegacyEndpointHeadersBeforeSnapshot(t *testing.T) {
+	f := newIngestFixture(t)
+	org := f.createOrg("active")
+	legacyHeaders := `{"x-tenant":"acme","x-trace-id":"trace","authorization":"legacy-secret","X.Api.Key":"legacy-api"}`
+	endpointID := f.createEndpoint(org, "legacy", "active", legacyHeaders)
+	f.subscribe(org, endpointID, "legacy.headers", true)
+
+	ctx := context.Background()
+	var before string
+	if err := f.pool.QueryRow(ctx, `SELECT http_headers::text FROM endpoints WHERE id = $1::uuid`, endpointID).Scan(&before); err != nil {
+		t.Fatalf("read legacy endpoint headers: %v", err)
+	}
+	result := f.mustAccept(org, "legacy-headers-key", ingestBody("legacy.headers", `{}`))
+	var snapshot string
+	if err := f.pool.QueryRow(ctx, `SELECT http_headers::text FROM deliveries WHERE event_id = $1::uuid`, result.EventID).Scan(&snapshot); err != nil {
+		t.Fatalf("read delivery snapshot headers: %v", err)
+	}
+	var headers map[string]string
+	if err := json.Unmarshal([]byte(snapshot), &headers); err != nil {
+		t.Fatalf("decode delivery snapshot headers: %v", err)
+	}
+	if len(headers) != 2 || headers["x-tenant"] != "acme" || headers["x-trace-id"] != "trace" {
+		t.Fatalf("filtered snapshot headers = %v", headers)
+	}
+	if strings.Contains(snapshot, "legacy-secret") || strings.Contains(snapshot, "legacy-api") {
+		t.Fatalf("snapshot contains legacy credential values: %s", snapshot)
+	}
+	var after string
+	if err := f.pool.QueryRow(ctx, `SELECT http_headers::text FROM endpoints WHERE id = $1::uuid`, endpointID).Scan(&after); err != nil {
+		t.Fatalf("read legacy endpoint headers after ingestion: %v", err)
+	}
+	if after != before {
+		t.Fatalf("ingestion mutated historical endpoint headers: before %s after %s", before, after)
+	}
+}
+
+func TestIngestionInexactNumberMetric(t *testing.T) {
+	f := newIngestFixture(t)
+	org := f.createOrg("active")
+	f.mustAccept(org, "inexact-metric-key", ingestBody("metric.inexact", `{"n":1e-400}`))
+	recorder := httptest.NewRecorder()
+	f.metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(recorder.Body.String(), event.InexactNumberMetric+" 1") {
+		t.Fatalf("inexact-number metric = %q, want count 1", recorder.Body.String())
 	}
 }
 
@@ -674,7 +727,7 @@ func TestIngestionZeroDestinations(t *testing.T) {
 func TestIngestionSecretSnapshotIsImmutable(t *testing.T) {
 	f := newIngestFixture(t)
 	org := f.createOrg("active")
-	endpoint := f.createEndpoint(org, "snapshot", "active", `{"x-endpoint":"static"}`)
+	endpoint := f.createEndpoint(org, "snapshot", "active", `{"x-tenant":"static"}`)
 	f.subscribe(org, endpoint, "snapshot.test", true)
 
 	first := f.mustAccept(org, "snapshot-key-1", ingestBody("snapshot.test", `{"n":1}`))
@@ -695,7 +748,7 @@ func TestIngestionSecretSnapshotIsImmutable(t *testing.T) {
 	).Scan(&url, &headers, &secret); err != nil {
 		t.Fatalf("read accepted snapshot: %v", err)
 	}
-	if url != "https://example.test/snapshot" || secret != "cipher-snapshot" || headers != `{"x-endpoint": "static"}` {
+	if url != "https://example.test/snapshot" || secret != "cipher-snapshot" || headers != `{"x-tenant": "static"}` {
 		t.Fatalf("accepted snapshot changed after rotation: url %q headers %q secret %q", url, headers, secret)
 	}
 

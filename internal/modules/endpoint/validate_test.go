@@ -1,6 +1,7 @@
 package endpoint
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -108,12 +109,12 @@ func TestValidateStatus(t *testing.T) {
 func TestCanonicalHeaders(t *testing.T) {
 	canonical, err := CanonicalHeaders(map[string]string{
 		"X-Trace-Id": "abc",
-		"Accept":     "application/json",
+		"X-Tenant":   "acme",
 	})
 	if err != nil {
 		t.Fatalf("CanonicalHeaders() = %v", err)
 	}
-	if canonical["x-trace-id"] != "abc" || canonical["accept"] != "application/json" {
+	if canonical["x-trace-id"] != "abc" || canonical["x-tenant"] != "acme" {
 		t.Fatalf("CanonicalHeaders() = %v, want lowercase names", canonical)
 	}
 
@@ -153,6 +154,138 @@ func TestCanonicalHeadersEmpty(t *testing.T) {
 	}
 }
 
+func TestCanonicalHeadersCredentialPolicy(t *testing.T) {
+	const secretValue = "credential-value-must-not-be-echoed"
+	rejected := []string{
+		"Authorization", "aUtHoRiZaTiOn", "Proxy-Authorization", "Cookie", "Set-Cookie",
+		"X-API-Key", "Api-Key", "X-Auth-Token", "X-Access-Token", "X-Refresh-Token",
+		"X-ID-Token", "X-Session-Token", "X-Csrf-Token", "X-Client-Secret",
+		"X-Client-Password", "X-Password", "X-Passwd", "X-Credentials", "X-Private-Key",
+		"X-Auth", "X-Authentication", "X-Bearer", "X-JWT",
+		"X.Api.Key", "X.Access.Key", "X.Private.Key", "X.Secret.Key",
+		"X_API_KEY", "x.auth.token", "XApiKey", "XAuthToken",
+	}
+	for _, name := range rejected {
+		t.Run(name, func(t *testing.T) {
+			canonical, field := CanonicalHeaders(map[string]string{name: secretValue})
+			if field == nil || canonical != nil {
+				t.Fatalf("CanonicalHeaders(%q) = %v, %v; want rejection", name, canonical, field)
+			}
+			if field.Code != "invalid_headers" || strings.Contains(field.Detail, secretValue) {
+				t.Fatalf("unsafe header rejection: %+v", field)
+			}
+		})
+	}
+
+	accepted := []string{
+		"X-Tenant", "X-Tenant-Id", "X-Trace-Id", "X-Event-Version", "X-Token-Count", "X-Tokenizer-Version",
+	}
+	for _, name := range accepted {
+		t.Run(name, func(t *testing.T) {
+			canonical, field := CanonicalHeaders(map[string]string{name: "ordinary-value"})
+			if field != nil {
+				t.Fatalf("CanonicalHeaders(%q) = %v, want acceptance", name, field)
+			}
+			if got := canonical[strings.ToLower(name)]; got != "ordinary-value" {
+				t.Fatalf("canonical headers = %v", canonical)
+			}
+		})
+	}
+
+	for _, name := range []string{"X-Custom", "X-Test", "Accept", "Content-Type", "X-HookFlow-Delivery-Id"} {
+		t.Run("unsupported "+name, func(t *testing.T) {
+			if _, field := CanonicalHeaders(map[string]string{name: secretValue}); field == nil {
+				t.Fatalf("CanonicalHeaders accepted unsupported name %q", name)
+			}
+		})
+	}
+
+	for _, name := range []string{"", "X Bad", "X\tBad", "X:Bad"} {
+		t.Run("malformed "+name, func(t *testing.T) {
+			if _, field := CanonicalHeaders(map[string]string{name: secretValue}); field == nil {
+				t.Fatalf("CanonicalHeaders accepted malformed name %q", name)
+			}
+		})
+	}
+}
+
+func TestCredentialBearingHeaderSegmentPolicy(t *testing.T) {
+	for _, name := range []string{
+		"Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie", "X-Auth", "X-Authentication",
+		"X-Bearer", "X-JWT", "X.Api.Key", "X.Access.Key", "X.Private.Key", "X.Secret.Key",
+		"X-API-Key", "X-Access-Key", "X-Auth-Token", "X-Access-Token", "X-Client-Secret",
+		"X-Password", "X-Passwd", "X-Pwd", "XPwd", "X-Credential", "X-Session-Token", "XApiKey", "XAuthToken",
+		"X-Auth-Key", "XAuthKey", "X-Signing-Key", "X-Encryption-Key", "X-HMAC-Key",
+	} {
+		if !CredentialBearingHeader(name) {
+			t.Errorf("CredentialBearingHeader(%q) = false", name)
+		}
+	}
+	for _, name := range []string{
+		"X-Tenant", "X-Trace-Id", "X-Token-Count", "X-Tokenizer-Version",
+		"X-Cookie-Count", "X-Password-Expiry", "X-Credential-Type", "X-Token-Status",
+		"X-Auth-Type", "X-Auth-Version", "X-Signing-Key-Version", "X-Encryption-Key-Rotation",
+	} {
+		if CredentialBearingHeader(name) {
+			t.Errorf("CredentialBearingHeader(%q) = true", name)
+		}
+	}
+}
+
+func TestSafeHeadersFiltersHistoricalValuesDeterministically(t *testing.T) {
+	headers := map[string]string{
+		"X-Tenant":      "acme",
+		"X.Api.Key":     "legacy-secret",
+		"X-Custom":      "unsupported",
+		"X-Token-Count": "3",
+		"X-Trace-Id":    "trace",
+		"X-TENANT":      "ambiguous",
+	}
+	got := SafeHeaders(headers)
+	want := map[string]string{"x-token-count": "3", "x-trace-id": "trace"}
+	if len(got) != len(want) {
+		t.Fatalf("SafeHeaders() = %v, want %v", got, want)
+	}
+	for name, value := range want {
+		if got[name] != value {
+			t.Fatalf("SafeHeaders()[%q] = %q, want %q", name, got[name], value)
+		}
+	}
+	if headers["X.Api.Key"] != "legacy-secret" || headers["X-TENANT"] != "ambiguous" {
+		t.Fatal("SafeHeaders mutated its input")
+	}
+}
+
+func TestPersistenceBoundaryRejectsUnsupportedHeaders(t *testing.T) {
+	for _, write := range []struct {
+		name string
+		run  func() error
+	}{
+		{name: "insert", run: func() error {
+			_, err := Insert(context.Background(), nil, Record{HTTPHeaders: map[string]string{"X-Auth": "secret"}})
+			return err
+		}},
+		{name: "update", run: func() error {
+			_, err := Update(context.Background(), nil, Record{HTTPHeaders: map[string]string{"X-Custom": "secret"}})
+			return err
+		}},
+	} {
+		t.Run(write.name, func(t *testing.T) {
+			if err := write.run(); err == nil {
+				t.Fatal("persistence boundary accepted unsupported headers")
+			}
+		})
+	}
+}
+
+func TestValidateCreateInputRejectsCredentialHeader(t *testing.T) {
+	_, field := ValidateCreateInput("receiver", nil, "https://example.test/hook",
+		map[string]string{"X-Auth-Token": "create-secret"})
+	if field == nil || field.Code != "invalid_headers" || strings.Contains(field.Detail, "create-secret") {
+		t.Fatalf("ValidateCreateInput() field = %+v, want safe credential rejection", field)
+	}
+}
+
 func manyHeaders(count int) map[string]string {
 	headers := make(map[string]string, count)
 	for i := 0; i < count; i++ {
@@ -162,9 +295,10 @@ func manyHeaders(count int) map[string]string {
 }
 
 func manyValues(count int) map[string]string {
+	names := []string{"x-tenant", "x-tenant-id", "x-trace-id", "x-event-version", "x-token-count", "x-tokenizer-version"}
 	headers := make(map[string]string, count)
 	for i := 0; i < count; i++ {
-		headers["x-test-"+strings.Repeat("a", i)] = strings.Repeat("v", MaxHeaderValueLength)
+		headers[names[i%len(names)]] = strings.Repeat("v", MaxHeaderValueLength)
 	}
 	return headers
 }

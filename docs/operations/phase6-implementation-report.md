@@ -208,7 +208,9 @@ Validation occurs before any lock:
   no whitespace/control characters; no DNS resolution or SSRF claim.
 - `http_headers`: at most 32 headers; RFC 7230 token names; values at most 4096 bytes; no
   control characters; names lowercased, duplicates rejected case-insensitively, total
-  length at most 16 KiB; canonical deterministic form stored.
+  length at most 16 KiB; canonical deterministic form stored. Credential-bearing names
+  and patterns are rejected by the conservative policy documented in
+  `docs/operations/configuration.md`; rejected values are never persisted or echoed.
 - `status`: `active` or `paused`.
 - `event_type`: exact lowercase routing key, 1–160 characters, no wildcard syntax.
 

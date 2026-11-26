@@ -19,6 +19,7 @@ import (
 
 	"github.com/metamin44/hookflow/internal/app/delivery"
 	"github.com/metamin44/hookflow/internal/platform/destination"
+	"github.com/metamin44/hookflow/internal/platform/observability"
 	"github.com/metamin44/hookflow/internal/platform/signing"
 )
 
@@ -70,7 +71,7 @@ func executorTestPreparation(requestURL string) delivery.HTTPPreparation {
 		DispatchSeq:    7,
 		Remaining:      30 * time.Second,
 		RequestURL:     requestURL,
-		RequestHeaders: `{"Authorization":"Bearer request-secret","X-Custom":"snapshot"}`,
+		RequestHeaders: `{"Authorization":"Bearer request-secret","X-Auth":"legacy-auth","X.Api.Key":"legacy-api","X-Pwd":"legacy-password","X-Custom":"snapshot"}`,
 		EventPayload:   `{"payload":"raw-event"}`,
 	}
 }
@@ -248,11 +249,15 @@ func TestExecutorHTTPStatusClassification(t *testing.T) {
 					"X-HookFlow-Delivery-Id":       preparation.DeliveryID,
 					"X-HookFlow-Event-Id":          preparation.EventID,
 					"X-HookFlow-Dispatch-Sequence": "7",
-					"Authorization":                "Bearer request-secret",
 					"X-Custom":                     "snapshot",
 				} {
 					if got := request.header.Get(name); got != want {
 						t.Errorf("request header %s = %q, want %q", name, got, want)
+					}
+				}
+				for _, name := range []string{"Authorization", "X-Auth", "X.Api.Key", "X-Pwd"} {
+					if value := request.header.Get(name); value != "" {
+						t.Fatalf("legacy credential header %s = %q was transmitted", name, value)
 					}
 				}
 				if request.header.Get("X-HookFlow-Signature") != "" {
@@ -286,6 +291,87 @@ func TestExecutorHTTPStatusClassification(t *testing.T) {
 	}
 }
 
+func TestExecutorFiltersLegacyCredentialHeadersAndCounts(t *testing.T) {
+	t.Parallel()
+
+	metrics := observability.New()
+	var transmitted http.Header
+	opts := executorTestOptions()
+	opts.Metrics = metrics
+	opts.Client = &http.Client{Transport: executorRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		transmitted = request.Header.Clone()
+		return &http.Response{StatusCode: http.StatusNoContent, Header: http.Header{}, Body: http.NoBody, Request: request}, nil
+	})}
+	executor := newExecutorForTest(t, opts)
+	preparation := executorTestPreparation(executorTestURL)
+	originalSnapshot := preparation.RequestHeaders
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := executor.Execute(context.Background(), preparation, http.MethodPost); err != nil {
+			t.Fatalf("Execute() error: %v", err)
+		}
+		if got := transmitted.Get("X-Custom"); got != "snapshot" {
+			t.Fatalf("safe snapshot header = %q, want snapshot", got)
+		}
+		for _, name := range []string{"Authorization", "X-Auth", "X.Api.Key", "X-Pwd"} {
+			if value := transmitted.Get(name); value != "" {
+				t.Fatalf("legacy credential header %s = %q was transmitted", name, value)
+			}
+		}
+		if transmitted.Get("X-HookFlow-Delivery-Id") != preparation.DeliveryID ||
+			transmitted.Get("X-HookFlow-Event-Id") != preparation.EventID ||
+			transmitted.Get("X-HookFlow-Dispatch-Sequence") != "7" {
+			t.Fatalf("application-managed identity headers changed: %v", transmitted)
+		}
+	}
+	if preparation.RequestHeaders != originalSnapshot {
+		t.Fatal("execution filtering mutated the stored snapshot input")
+	}
+	recorder := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(recorder.Body.String(), legacyCredentialHeadersFilteredMetric+" 8") {
+		t.Fatalf("filtered-header metric = %q, want count 8", recorder.Body.String())
+	}
+}
+
+func TestExecutorInvalidResponseStatusTerminalAttempt(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{600, 999} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			t.Parallel()
+			var requests atomic.Int32
+			opts := executorTestOptions()
+			opts.Client = &http.Client{Transport: executorRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				requests.Add(1)
+				return &http.Response{
+					StatusCode: status,
+					Header:     http.Header{"Content-Type": {"text/plain"}},
+					Body:       http.NoBody,
+					Request:    request,
+				}, nil
+			})}
+			executor := newExecutorForTest(t, opts)
+			outcome, err := executor.Execute(context.Background(), executorTestPreparation(executorTestURL), http.MethodPost)
+			if err != nil {
+				t.Fatalf("Execute returned error: %v", err)
+			}
+			if requests.Load() != 1 {
+				t.Fatalf("HTTP requests = %d, want 1", requests.Load())
+			}
+			if outcome.Kind != delivery.OutcomeTerminalFailure || outcome.ResponseStatus != nil {
+				t.Fatalf("outcome = %+v, want terminal failure with nil status", outcome)
+			}
+			if outcome.ErrorClass != "http_status" || outcome.ErrorMessage != "HTTP endpoint returned an invalid response status" {
+				t.Fatalf("invalid status diagnostic = %+v", outcome)
+			}
+			if outcome.StartedAt.IsZero() || outcome.FinishedAt.Before(outcome.StartedAt) {
+				t.Fatalf("invalid status attempt metadata = %+v", outcome)
+			}
+		})
+	}
+}
+
 func TestExecutorRejectsInvalidHeadersWithoutNetwork(t *testing.T) {
 	t.Parallel()
 
@@ -308,6 +394,7 @@ func TestExecutorRejectsInvalidHeadersWithoutNetwork(t *testing.T) {
 		`{"X-Test":{}}`,
 		`{} {}`,
 		`{"Bad Name":"value"}`,
+		`{"X-Test":"a","x-test":"b"}`,
 		`{"X-Test":"line\r\nInjected: value"}`,
 	} {
 		preparation := executorTestPreparation(executorTestURL)
@@ -317,8 +404,12 @@ func TestExecutorRejectsInvalidHeadersWithoutNetwork(t *testing.T) {
 			t.Errorf("headers %q were accepted", snapshot)
 			continue
 		}
-		if strings.Contains(err.Error()+outcome.ErrorMessage, "request-secret") {
-			t.Errorf("headers %q leaked a secret in the error", snapshot)
+		var preHTTP *delivery.PreHTTPError
+		if !errors.As(err, &preHTTP) || preHTTP.Reason != delivery.ReasonHeadersInvalid {
+			t.Errorf("headers %q error = %v, want permanent headers_invalid", snapshot, err)
+		}
+		if outcome.Kind != delivery.OutcomeTerminalFailure || strings.Contains(err.Error()+outcome.ErrorMessage, "request-secret") {
+			t.Errorf("headers %q produced unsafe outcome %+v / error %v", snapshot, outcome, err)
 		}
 	}
 	if got := requests.Load(); got != 0 {
@@ -429,6 +520,14 @@ func TestExecutorSignsExactTransmittedBody(t *testing.T) {
 			if got := request.header.Get(name); got != value {
 				t.Errorf("transmitted %s = %q, want %q", name, got, value)
 			}
+		}
+		for _, name := range []string{"Authorization", "X-Auth", "X.Api.Key", "X-Pwd"} {
+			if value := request.header.Get(name); value != "" {
+				t.Errorf("signed request transmitted legacy credential header %s = %q", name, value)
+			}
+		}
+		if got := request.header.Get("X-Custom"); got != "snapshot" {
+			t.Errorf("signed request safe snapshot header = %q, want snapshot", got)
 		}
 	default:
 		t.Fatal("HTTP handler did not receive the request")

@@ -13,16 +13,22 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/metamin44/hookflow/internal/app/delivery"
+	"github.com/metamin44/hookflow/internal/modules/endpoint"
 	"github.com/metamin44/hookflow/internal/platform/destination"
+	"github.com/metamin44/hookflow/internal/platform/observability"
 	"github.com/metamin44/hookflow/internal/platform/signing"
 )
 
-const maxResponseSnippetRunes = 2000
+const (
+	maxResponseSnippetRunes               = 2000
+	legacyCredentialHeadersFilteredMetric = "hookflow_worker_legacy_credential_headers_filtered_total"
+)
 
 var (
 	errHTTPContextRequired = errors.New("HTTP execution context is required")
@@ -49,6 +55,9 @@ type HTTPOptions struct {
 	// pin answers without external DNS; it is not configuration-driven.
 	Resolver destination.Resolver
 	Client   *http.Client
+	// Metrics receives only fixed-cardinality counters. It is optional for
+	// isolated executor tests; production composition supplies the Worker registry.
+	Metrics *observability.Metrics
 }
 
 // Validate checks all budgets and installs a safe client when none is supplied.
@@ -153,8 +162,14 @@ func (e *Executor) prepareRequest(ctx context.Context, preparation delivery.HTTP
 	if headerErr != nil {
 		outcome.Kind = delivery.OutcomeTerminalFailure
 		outcome.ErrorClass = "internal"
-		outcome.ErrorMessage = headerErr.Error()
-		return nil, noop, headerErr
+		outcome.ErrorMessage = "stored webhook request headers are invalid"
+		return nil, noop, &delivery.PreHTTPError{
+			Reason:  delivery.ReasonHeadersInvalid,
+			Message: outcome.ErrorMessage,
+		}
+	}
+	if filtered := filterCredentialHeaders(headers); filtered > 0 {
+		e.opts.Metrics.Add(legacyCredentialHeadersFilteredMetric, int64(filtered))
 	}
 	executionCtx, cancel := context.WithTimeout(ctx, e.opts.Deadline)
 	body := []byte(preparation.EventPayload)
@@ -260,8 +275,18 @@ func (e *Executor) Execute(ctx context.Context, preparation delivery.HTTPPrepara
 	defer func() { _ = response.Body.Close() }()
 
 	status := response.StatusCode
-	outcome.ResponseStatus = &status
 	outcome.ResponseHeaders = safeResponseHeaders(response.Header)
+	if status < 100 || status > 599 {
+		// The request was executed and a response was observed, but this status
+		// cannot be represented by the approved 100..599 database contract.
+		// Persist one terminal attempt with a nil status rather than weakening
+		// the constraint or turning a protocol violation into an uncertain write.
+		outcome.Kind = delivery.OutcomeTerminalFailure
+		outcome.ErrorClass = "http_status"
+		outcome.ErrorMessage = "HTTP endpoint returned an invalid response status"
+		return outcome, nil
+	}
+	outcome.ResponseStatus = &status
 	body, readErr := readResponseBody(response.Body, e.opts.ResponseBodyLimit)
 	outcome.ResponseBodySnippet = responseSnippet(body)
 	if readErr != nil {
@@ -391,6 +416,17 @@ func validSignatureHeader(value string) bool {
 	return strings.HasPrefix(value, "v1,") && len(value) > 3 && len(value) <= 64
 }
 
+func filterCredentialHeaders(headers http.Header) int {
+	filtered := 0
+	for name := range headers {
+		if endpoint.CredentialBearingHeader(name) {
+			headers.Del(name)
+			filtered++
+		}
+	}
+	return filtered
+}
+
 func parseRequestHeaders(snapshot string) (http.Header, error) {
 	trimmed := bytes.TrimSpace([]byte(snapshot))
 	if len(trimmed) == 0 || trimmed[0] != '{' {
@@ -401,13 +437,21 @@ func parseRequestHeaders(snapshot string) (http.Header, error) {
 		return nil, errHTTPHeadersInvalid
 	}
 	headers := make(http.Header, len(values)+4)
-	for name, raw := range values {
-		raw = bytes.TrimSpace(raw)
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		raw := bytes.TrimSpace(values[name])
 		if !validHeaderName(name) || len(raw) == 0 || raw[0] != '"' {
 			return nil, errHTTPHeadersInvalid
 		}
 		var value string
 		if err := json.Unmarshal(raw, &value); err != nil || !validHeaderValue(value) {
+			return nil, errHTTPHeadersInvalid
+		}
+		if _, duplicate := headers[http.CanonicalHeaderKey(name)]; duplicate {
 			return nil, errHTTPHeadersInvalid
 		}
 		headers.Set(name, value)

@@ -105,8 +105,26 @@ func invalidSecretFailure() *preHTTPFailure {
 // an expired resolution deadline cannot lose the durable failure record. Broker
 // settlement remains ACK-after-commit.
 func (r *Runtime) settlePreHTTP(ctx context.Context, claim delivery.Claim, failure preHTTPFailure) disposition.Decision {
+	work := settlementWork(ctx)
+	if work != nil && !work.admitSettlement() {
+		return disposition.Decide(disposition.OutcomeUncertain, false)
+	}
+	forceCtx := settlementForceContext(ctx)
 	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), preHTTPSettlementTimeout)
 	defer cancel()
+	if forceCtx != nil {
+		// Cancellation may be asynchronous, but admission above is the atomic
+		// force-stop gate. A force-stop after admission cancels this admitted work;
+		// it cannot make an unadmitted database call start later.
+		stop := context.AfterFunc(forceCtx, cancel)
+		defer stop()
+		if forceCtx.Err() != nil {
+			return disposition.Decide(disposition.OutcomeUncertain, false)
+		}
+	}
+	if settleCtx.Err() != nil {
+		return disposition.Decide(disposition.OutcomeUncertain, false)
+	}
 
 	options := delivery.PreHTTPFailureOptions{Reason: failure.reason, Error: failure.message}
 	if failure.reason.Transient() {
@@ -146,6 +164,8 @@ func preHTTPMetric(reason delivery.PreHTTPReason) string {
 		return "hookflow_worker_signing_internal_total"
 	case delivery.ReasonDestinationDisallowed:
 		return "hookflow_worker_destination_disallowed_total"
+	case delivery.ReasonHeadersInvalid:
+		return "hookflow_worker_headers_invalid_total"
 	default:
 		return "hookflow_worker_secret_unavailable_total"
 	}
@@ -222,7 +242,7 @@ func NewRuntime(cfg config.DeliveryWorker, security config.DeliverySecurity, pro
 		"hookflow_worker_secret_unavailable_total", "hookflow_worker_secret_missing_total",
 		"hookflow_worker_secret_invalid_total", "hookflow_worker_provider_disallowed_total",
 		"hookflow_worker_signing_internal_total", "hookflow_worker_succeeded_total",
-		"hookflow_worker_destination_disallowed_total",
+		"hookflow_worker_destination_disallowed_total", "hookflow_worker_headers_invalid_total",
 		"hookflow_worker_retry_scheduled_total", "hookflow_worker_failed_total",
 		"hookflow_worker_expired_total", "hookflow_worker_uncertain_total",
 		"hookflow_worker_publication_pending_total",

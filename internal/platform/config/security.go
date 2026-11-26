@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -57,6 +58,9 @@ func (s DeliverySecurity) Validate() error {
 	}
 	if s.KeyringPath == "" {
 		return errors.New("secret keyring path is required")
+	}
+	if !filepath.IsAbs(s.KeyringPath) || strings.ContainsAny(s.KeyringPath, "\x00\r\n") {
+		return errors.New("secret keyring path must be an absolute native path without control characters")
 	}
 	if s.CurrentKID == "" {
 		return errors.New("secret current kid is required")

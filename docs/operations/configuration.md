@@ -8,7 +8,7 @@ HookFlow reads process configuration from the environment. `.env.example` contai
 - `cmd/api` and `cmd/worker` also require the delivery-security block (`HOOKFLOW_DEPLOYMENT_MODE`, `HOOKFLOW_SECRET_*`); it fails closed when unset or contradictory.
 - Publisher, Recovery, delivery-Worker and RabbitMQ timing/count values use the defaults below when **unset**. A present empty or whitespace-only value is invalid.
 - API and metrics addresses treat unset, empty or whitespace-only values as their documented default/disabled state.
-- The endpoint ceiling and idempotency sweep values use their defaults when unset, empty or whitespace-only.
+- The endpoint ceiling uses its default only when unset; a present empty or whitespace-only value is invalid. The idempotency sweep values use their defaults when unset, empty or whitespace-only.
 - Durations use Go duration syntax (`500ms`, `30s`, `5m`, `12h`). Counts are positive base-10 integers.
 - Validation errors name variables but must not include credential values. Keep URIs and passwords out of command traces, logs and tickets.
 
@@ -30,7 +30,7 @@ HookFlow reads process configuration from the environment. `.env.example` contai
 | Variable | Applies to | Default | Validation / invariant |
 | --- | --- | --- | --- |
 | `HOOKFLOW_API_ADDR` | `cmd/api` | `:8080` | Listen `host:port`; port `1..65535`; host must not contain whitespace or `/`. An empty host binds all interfaces. |
-| `HOOKFLOW_MAX_ACTIVE_ENDPOINTS_PER_ORG` | `cmd/api` | `100` | Positive integer; per-organization ceiling for live `active` endpoints (U37), enforced under the organization row lock (U38). Lowering it later does not pause or delete existing endpoints. |
+| `HOOKFLOW_MAX_ACTIVE_ENDPOINTS_PER_ORG` | `cmd/api` | `100` when unset | Present value must be a positive integer; empty or whitespace-only is invalid. Per-organization ceiling for live `active` endpoints (U37), enforced under the organization row lock (U38). Lowering it later does not pause or delete existing endpoints. |
 
 Routes: `GET /health/live`, `GET /health/ready`, the Phase 7 ingestion route `POST /v1/events`, and the
 Phase 6 management API under `/v1/organizations/{organization_id}/endpoints` (create/list, get/PATCH/DELETE,
@@ -40,6 +40,42 @@ Readiness pings PostgreSQL; it does not imply RabbitMQ or delivery readiness.
 
 `cmd/api` also loads the delivery-security block below because secret rotation wraps envelopes with the same KEK
 provider, and it fails startup when that block is missing or contradictory.
+
+### Custom endpoint-header policy
+
+Endpoint create and PATCH accept only the following explicit, case-insensitive allowlist:
+
+- `X-Tenant`
+- `X-Tenant-Id`
+- `X-Trace-Id`
+- `X-Event-Version`
+- `X-Token-Count`
+- `X-Tokenizer-Version`
+
+Names must still be RFC 7230 tokens with valid bounded values. Unsupported names, application-managed
+`webhook-*`, `X-HookFlow-*`, content, transport, routing and signature headers are rejected with
+`400 invalid_headers`; rejected values are never echoed or logged. The same policy is revalidated at the
+persistence boundary.
+
+A defense-in-depth credential classifier normalizes case and hyphen/underscore/dot segment boundaries. It
+recognizes authorization, proxy-authorization, cookie/set-cookie, `X-Auth`, `X-Authentication`, `X-Bearer`,
+`X-JWT`, API/access/auth/private/secret/signing/encryption/HMAC keys, auth/access/refresh/ID/session/security
+tokens, client secrets, password/passwd/pwd variants and credentials while allowing benign metadata such as `X-Cookie-Count`, `X-Password-Expiry`,
+`X-Credential-Type` and `X-Token-Count`. The allowlist remains authoritative.
+
+Historical endpoint rows are not rewritten. GET/LIST/create/PATCH responses expose only safe allowlisted
+values; recognized credential-bearing and unsupported historical values are omitted. Contract A ETags still
+cover the full unredacted stored state. Historical case-insensitive duplicate names use deterministic raw-name
+ordering for ETag canonicalization; normal canonical tags are unchanged. New Delivery snapshots copy only safe allowlisted endpoint headers.
+Existing immutable Delivery snapshots are also not rewritten, but the Worker filters recognized
+credential-bearing custom headers before every transmission and preserves application-generated identity and
+signature headers. Filtering emits only the fixed-cardinality
+`hookflow_worker_legacy_credential_headers_filtered_total` counter.
+
+Name validation is not a content scanner: a secret deliberately placed in the value of an allowed benign
+header cannot be detected reliably. If real credentials may have been stored historically, a separately
+authorized inventory and external credential-rotation exercise is still required. This remediation does not
+prove that historical credentials were never exposed.
 
 ## Ingestion boundary (OD-5, fixed — not configuration)
 
@@ -121,6 +157,7 @@ Cross-field invariants:
 | `HOOKFLOW_WORKER_HANDSHAKE_BUDGET` | `2s` | Positive duration; reserved for connection/TLS/header setup. |
 | `HOOKFLOW_WORKER_POST_PROCESS_BUDGET` | `3s` | Positive duration; reserved for durable completion. |
 | `HOOKFLOW_WORKER_SHUTDOWN_RESERVE` | `10s` | Positive duration; reserved during graceful shutdown. |
+| `HOOKFLOW_WORKER_SECRET_RESOLUTION_BUDGET` | `2s` | Positive duration; bounds KEK resolution before HTTP and is included in the pre-resolution lease requirement. |
 | `HOOKFLOW_WORKER_CONCURRENCY` | `24` | Positive integer no greater than `65535`; maximum in-flight pointer processing. |
 | `HOOKFLOW_WORKER_PREFETCH` | `24` | Positive integer no greater than `65535`; per-consumer AMQP prefetch. |
 | `HOOKFLOW_WORKER_POOL_SIZE` | `30` | Positive integer no greater than `math.MaxInt32`; pgx pool maximum for the Worker. |
@@ -133,7 +170,7 @@ Cross-field invariants:
 
 - `PREFETCH == CONCURRENCY`.
 - `POOL_SIZE >= CONCURRENCY`.
-- `LEASE_DURATION > HTTP_DEADLINE + HANDSHAKE_BUDGET + POST_PROCESS_BUDGET + SHUTDOWN_RESERVE` (default `30s > 25s`). The same sum is the minimum remaining lease required before HTTP starts.
+- `LEASE_DURATION > HTTP_DEADLINE + HANDSHAKE_BUDGET + POST_PROCESS_BUDGET + SHUTDOWN_RESERVE + SECRET_RESOLUTION_BUDGET` (default `30s > 10s + 2s + 3s + 10s + 2s = 27s`). This five-component sum is the minimum remaining lease required before secret resolution and HTTP; the post-resolution executor check remains the four-component `25s` sum, preserving the approved 3-second slack and no-HTTP-if-insufficient-lease behavior.
 - QoS uses `global=false`. RabbitMQ 4.3.8/4.4.1 accepted `global=true` but behaved per-consumer/ignored the global setting; HookFlow does not rely on global QoS.
 - Retry ladder bases are `10s`, `30s`, `2m`, `5m`, `15m`, `1h`, `4h`, `12h`, with deterministic jitter from half the base through the base. A valid `429 Retry-After` overrides the ladder, capped at one hour and then by the configured horizon.
 - A nonempty `secret_encrypted` value never reaches HTTP unless it decrypts under an allowlisted KEK and kid. A decrypt failure is persisted with fresh database time, fence/expiry checks and pacing; it creates no delivery-attempt row, does not increment `attempt_count` and never falls back to unsigned. Empty-secret snapshots execute unsigned HTTP only when `HOOKFLOW_DEPLOYMENT_MODE=development` **and** `HOOKFLOW_ALLOW_UNSIGNED_DELIVERY=true`; otherwise they are dispositioned without HTTP. Signed requests carry `webhook-id`, `webhook-timestamp` and `webhook-signature` (`v1`, HMAC-SHA256 over `id.timestamp.body`).
@@ -199,13 +236,18 @@ Cross-field invariants:
 
 Cleanup affects expired `idempotency_records` only; it does not delete event/delivery history and is not required for key-expiry correctness.
 
-## Metrics — Publisher and Worker
+## Metrics — API, Publisher and Worker
 
 | Variable | Default | Validation / invariant |
 | --- | --- | --- |
-| `HOOKFLOW_METRICS_ADDR` | Empty (disabled) | Optional listen `host:port`; port `1..65535`; host must not contain whitespace or `/`. Each process needs its own port. |
+| `HOOKFLOW_METRICS_ADDR` | Empty (disabled) | Optional explicit `host:port`; port `1..65535`; empty/wildcard hosts, unspecified IPv4/IPv6 (including mapped forms), whitespace and `/` are rejected. Each process needs its own port. |
 
-The endpoint serves Prometheus text at `/metrics`, accepts GET only, and uses fixed low-cardinality metric names. It is not enabled on `cmd/api`.
+The endpoint serves Prometheus text at `/metrics`, accepts GET only, and uses fixed low-cardinality metric names.
+`cmd/api`, `cmd/outbox-publisher` and `cmd/worker` all support the optional separate listener; no metrics route is
+added to the public API mux. The API registry collects the ingestion inexact-number counter. Loopback binding
+is recommended. Any explicit non-loopback bind requires an approved scrape topology plus network ACL/firewall
+restrictions; a private network is not automatically trusted. The shared metrics server also verifies the actual
+bound TCP address and refuses an unspecified/wildcard address even if a hostname resolves to one.
 
 ## Management API authentication
 

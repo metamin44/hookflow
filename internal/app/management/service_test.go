@@ -95,6 +95,8 @@ func TestValidatePatchInputRejectsInvalidValues(t *testing.T) {
 		{name: "fragment url", patch: PatchInput{URL: stringPtr("https://example.test/#a")}, code: "invalid_url", field: "url"},
 		{name: "deleted status", patch: PatchInput{Status: stringPtr("deleted")}, code: "invalid_status", field: "status"},
 		{name: "reserved header", patch: PatchInput{Headers: map[string]string{"Authorization": "x"}, HeadersSet: true}, code: "invalid_headers", field: "http_headers"},
+		{name: "credential token header", patch: PatchInput{Headers: map[string]string{"X-Auth-Token": "do-not-echo"}, HeadersSet: true}, code: "invalid_headers", field: "http_headers"},
+		{name: "credential secret header", patch: PatchInput{Headers: map[string]string{"X-Client-Secret": "do-not-echo"}, HeadersSet: true}, code: "invalid_headers", field: "http_headers"},
 		{name: "case duplicate header", patch: PatchInput{Headers: map[string]string{"X-A": "1", "x-a": "2"}, HeadersSet: true}, code: "invalid_headers", field: "http_headers"},
 	}
 	for _, testCase := range cases {

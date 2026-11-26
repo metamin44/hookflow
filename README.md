@@ -104,16 +104,18 @@ The `201` response contains the `whsec_` secret exactly once and an `ETag`. PATC
 
 ### 5. Optional process metrics
 
-`HOOKFLOW_METRICS_ADDR` enables a process-local Prometheus text endpoint on the Publisher or Worker. Empty/unset disables it; the API does not expose this endpoint. Use a different port per process:
+`HOOKFLOW_METRICS_ADDR` enables a separate process-local Prometheus text endpoint on the API, Publisher or Worker. Empty/unset disables it; no metrics route is added to the public API mux. Use a different port per process:
 
 ```bash
+HOOKFLOW_METRICS_ADDR=127.0.0.1:9090 go run ./cmd/api
 HOOKFLOW_METRICS_ADDR=127.0.0.1:9091 go run ./cmd/outbox-publisher
 HOOKFLOW_METRICS_ADDR=127.0.0.1:9092 go run ./cmd/worker
+curl -fsS http://127.0.0.1:9090/metrics
 curl -fsS http://127.0.0.1:9091/metrics
 curl -fsS http://127.0.0.1:9092/metrics
 ```
 
-Bind to loopback or protect the listener with network policy. Metrics use fixed, low-cardinality names and must never contain entity IDs, payloads, credentials or secrets.
+An explicit host is required; wildcard binding is rejected. Bind to loopback or protect the listener with an approved network ACL/firewall policy. Metrics use fixed, low-cardinality names and must never contain entity IDs, payloads, credentials or secrets.
 
 ## Tests
 
@@ -136,11 +138,11 @@ go test -tags=integration ./... -count=1 -p 1
 CGO_ENABLED=1 go test -race ./... -count=1
 ```
 
-CI defines the same integration suite against pinned PostgreSQL 18 and RabbitMQ 4.4.1/4.3.8 service containers, fails if any required test is skipped, and includes a down-13/up migration proof in its disposable database. Hosted GitHub Actions execution is still pending: no commit or push was authorized.
+CI defines the same integration suite against pinned PostgreSQL 18 and RabbitMQ 4.4.1/4.3.8 service containers, fails if any required test is skipped, and includes a down-13/up migration proof in its disposable database. Hosted PR CI run `45681759235` passed for the pre-remediation SHA `00a5a82cbc638411278b49f3bf57c55cde5bf2d8`; the current remediation working-tree changes have not run hosted CI.
 
 Local execution evidence (2026-11-24, Phase 6 and Phase 6.1): Go 1.27.4 build/vet and unit tests passed (25/25 test-bearing packages, 29 total); PostgreSQL 18.7 plus RabbitMQ 4.4.1 and 4.3.8 integration passed (28/28 test-bearing packages, 0 failures, 2 Windows-only POSIX-permission skips); Linux CGO race tests passed for the whole module (27/27 test-bearing packages, no data races). The management suite has 23 top-level tests (12 Phase 6 + 11 Phase 6.1). `go mod verify` passed and `go mod tidy -diff` was empty. golangci-lint v2.15.0 ran in Phase 6 as a tool and reported 17 advisory findings (13 pre-existing cyclomatic/cognitive-complexity findings, one `PatchEndpoint` cognitive-complexity finding, and 3 pre-existing `gosec` integer-conversion findings); lint cleanliness is not claimed and lint was not rerun in Phase 6.1. No new migration, local schema rollback or container recreation was needed or performed. See the dated architecture evidence and operations runbook for the remaining hosted-CI and production gates.
 
-Phase 7 verification (2026-11-25) repeated the full suite after the Stage 5 documentation edits: 31 unit packages passed, 31 integration packages passed with 0 failures and the same 2 Windows-only skips, Linux container race passed with no data race, and `go mod verify`/`go mod tidy -diff` were clean. golangci-lint v2.15.0 reported 17 advisory findings, all in pre-existing code (none in Phase 7 code); lint cleanliness is still not claimed. No migration, schema change or infrastructure mutation was performed, and hosted CI remains NOT RUN.
+Phase 7 verification (2026-11-25) repeated the full suite after the Stage 5 documentation edits: 31 unit packages passed, 31 integration packages passed with 0 failures and the same 2 Windows-only skips, Linux container race passed with no data race, and `go mod verify`/`go mod tidy -diff` were clean. golangci-lint v2.15.0 reported 17 advisory findings, all in pre-existing code (none in Phase 7 code); lint cleanliness is still not claimed. No migration, schema change or infrastructure mutation was performed. The later hosted PR CI run `45681759235` passed on SHA `00a5a82cbc638411278b49f3bf57c55cde5bf2d8`; that is historical evidence for that exact pre-remediation SHA, not verification of the current working tree.
 
 ## Runtime contract and limits
 

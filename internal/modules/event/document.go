@@ -44,26 +44,29 @@ type Document struct {
 }
 
 // Parse validates body as one I-JSON object and applies, in the approved
-// order, duplicate-name rejection, literal-level integer-range validation,
-// binary64 conversion, non-finite rejection, guard G1, and the envelope shape
-// rules (a string event_type with the events.type syntax and an object
-// payload). Rejections are *Rejection values carrying the approved §5.5 code.
+// order, syntax and duplicate-name rejection, envelope shape rules (a string
+// event_type with the events.type syntax and an object payload), then the
+// literal-level integer-range, binary64, non-finite and guard-G1 numeric rules.
+// Rejections are *Rejection values carrying the approved §5.5 code.
 func Parse(body []byte) (Document, error) {
-	stats, err := jcs.Validate(body)
-	if err != nil {
+	if err := jcs.ValidateStructure(body); err != nil {
 		return Document{}, mapParserError(err)
 	}
 	document, err := parseEnvelope(body)
 	if err != nil {
 		return Document{}, err
 	}
+	stats, err := jcs.ValidateNumbers(body)
+	if err != nil {
+		return Document{}, mapParserError(err)
+	}
 	document.InexactNumbers = stats.InexactNumbers
 	return document, nil
 }
 
 // parseEnvelope reads event_type and the raw payload bytes. It runs after
-// jcs.Validate, so syntax, duplicate names, depth and numeric rules are
-// already settled.
+// jcs.ValidateStructure, so syntax, duplicate names and depth are settled while
+// numeric range validation is deliberately deferred until after the envelope.
 func parseEnvelope(body []byte) (Document, error) {
 	decoder := jsontext.NewDecoder(bytes.NewReader(body))
 	opening, err := decoder.ReadToken()

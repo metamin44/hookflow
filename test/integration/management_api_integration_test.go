@@ -608,6 +608,123 @@ func TestManagementEndpointLifecycle(t *testing.T) {
 	}
 }
 
+func TestManagementEndpointCredentialHeaderPolicy(t *testing.T) {
+	f := newMgmtFixture(t, mgmtOptions{})
+	token, _ := f.createKey("full", "endpoints:write")
+	const secretValue = "endpoint-credential-must-not-persist"
+
+	created := f.createEndpoint(token, `{"name":"orders","url":"https://example.test/hooks","http_headers":{"X-Tenant":"acme"}}`)
+	for _, name := range []string{
+		"X-API-Key", "X-Auth-Token", "X-Client-Secret", "X-Password", "X-Auth", "X-Authentication",
+		"X-Bearer", "X-JWT", "X.Api.Key", "X.Access.Key", "X.Private.Key", "X.Secret.Key", "X-Custom",
+	} {
+		body := fmt.Sprintf(`{"name":"rejected","url":"https://example.test/rejected","http_headers":{%q:%q}}`, name, secretValue)
+		reply := f.do(http.MethodPost, f.endpoints(), token, body)
+		wantProblem(t, reply, http.StatusBadRequest, "invalid_headers", "http_headers")
+		if bytes.Contains(reply.body, []byte(secretValue)) {
+			t.Fatalf("create rejection echoed credential value for %s", name)
+		}
+	}
+
+	for _, name := range []string{"X-Access-Token", "X-Csrf-Token", "X-Credentials"} {
+		body := fmt.Sprintf(`{"http_headers":{%q:%q}}`, name, secretValue)
+		reply := f.do(http.MethodPatch, f.endpoint(created.ID), token, body, "If-Match", "*")
+		wantProblem(t, reply, http.StatusBadRequest, "invalid_headers", "http_headers")
+		if bytes.Contains(reply.body, []byte(secretValue)) {
+			t.Fatalf("patch rejection echoed credential value for %s", name)
+		}
+	}
+
+	get := f.do(http.MethodGet, f.endpoint(created.ID), token, "")
+	wantStatus(t, get, http.StatusOK, "get endpoint after rejected credentials")
+	document := decodeMgmt[endpointDoc](t, get)
+	if len(document.HTTPHeaders) != 1 || document.HTTPHeaders["x-tenant"] != "acme" {
+		t.Fatalf("rejected credential changed stored headers: %v", document.HTTPHeaders)
+	}
+	list := f.do(http.MethodGet, f.endpoints(), token, "")
+	wantStatus(t, list, http.StatusOK, "list endpoints after rejected credentials")
+	listed := decodeMgmt[struct {
+		Endpoints []endpointDoc `json:"endpoints"`
+	}](t, list)
+	if len(listed.Endpoints) != 1 || listed.Endpoints[0].HTTPHeaders["x-tenant"] != "acme" {
+		t.Fatalf("list did not preserve valid custom headers: %+v", listed.Endpoints)
+	}
+}
+
+func TestManagementHistoricalCredentialHeadersRedactedWithFullETag(t *testing.T) {
+	f := newMgmtFixture(t, mgmtOptions{})
+	token, _ := f.createKey("full", "endpoints:write")
+	leftID := mustID(t)
+	rightID := mustID(t)
+	ctx := context.Background()
+	for _, seed := range []struct {
+		id      string
+		name    string
+		headers string
+	}{
+		{id: leftID, name: "legacy-a", headers: `{"x-tenant":"acme","authorization":"legacy-secret-a","X.Api.Key":"legacy-api-a"}`},
+		{id: rightID, name: "legacy-b", headers: `{"x-tenant":"acme","authorization":"legacy-secret-b","X.Api.Key":"legacy-api-b"}`},
+	} {
+		if _, err := f.pool.Exec(ctx, `INSERT INTO endpoints
+		        (id, organization_id, name, url, secret_encrypted, http_headers, status)
+		        VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb, 'active')`,
+			seed.id, f.orgID, seed.name, "https://example.test/"+seed.name, "legacy-envelope", seed.headers); err != nil {
+			t.Fatalf("seed legacy endpoint: %v", err)
+		}
+	}
+
+	leftReply := f.do(http.MethodGet, f.endpoint(leftID), token, "")
+	rightReply := f.do(http.MethodGet, f.endpoint(rightID), token, "")
+	wantStatus(t, leftReply, http.StatusOK, "get legacy endpoint a")
+	wantStatus(t, rightReply, http.StatusOK, "get legacy endpoint b")
+	for _, reply := range []mgmtReply{leftReply, rightReply} {
+		if bytes.Contains(reply.body, []byte("legacy-secret-")) || bytes.Contains(reply.body, []byte("legacy-api-")) {
+			t.Fatalf("GET exposed historical credential values: %s", reply.body)
+		}
+		document := decodeMgmt[endpointDoc](t, reply)
+		if len(document.HTTPHeaders) != 1 || document.HTTPHeaders["x-tenant"] != "acme" {
+			t.Fatalf("GET redacted headers = %v", document.HTTPHeaders)
+		}
+	}
+	if leftReply.etag() == rightReply.etag() {
+		t.Fatal("distinct full stored header values produced the same ETag")
+	}
+
+	listReply := f.do(http.MethodGet, f.endpoints(), token, "")
+	wantStatus(t, listReply, http.StatusOK, "list legacy endpoints")
+	if bytes.Contains(listReply.body, []byte("legacy-secret-")) || bytes.Contains(listReply.body, []byte("legacy-api-")) {
+		t.Fatalf("LIST exposed historical credential values: %s", listReply.body)
+	}
+	listed := decodeMgmt[struct {
+		Endpoints []endpointDoc `json:"endpoints"`
+	}](t, listReply)
+	if len(listed.Endpoints) != 2 {
+		t.Fatalf("listed endpoints = %d, want 2", len(listed.Endpoints))
+	}
+	for _, document := range listed.Endpoints {
+		if len(document.HTTPHeaders) != 1 || document.HTTPHeaders["x-tenant"] != "acme" {
+			t.Fatalf("LIST redacted headers = %v", document.HTTPHeaders)
+		}
+	}
+
+	wantProblem(t, f.do(http.MethodPatch, f.endpoint(rightID), token, `{"name":"changed"}`,
+		"If-Match", leftReply.etag()), http.StatusPreconditionFailed, "precondition_failed", "")
+	patched := f.do(http.MethodPatch, f.endpoint(rightID), token, `{"name":"changed"}`,
+		"If-Match", rightReply.etag())
+	wantStatus(t, patched, http.StatusOK, "patch legacy endpoint with full-state ETag")
+	if bytes.Contains(patched.body, []byte("legacy-secret-")) || bytes.Contains(patched.body, []byte("legacy-api-")) {
+		t.Fatalf("PATCH exposed historical credential values: %s", patched.body)
+	}
+
+	var stored string
+	if err := f.pool.QueryRow(ctx, `SELECT http_headers::text FROM endpoints WHERE id = $1::uuid`, rightID).Scan(&stored); err != nil {
+		t.Fatalf("read persisted legacy headers: %v", err)
+	}
+	if !strings.Contains(stored, "legacy-secret-b") || !strings.Contains(stored, "legacy-api-b") {
+		t.Fatalf("reads or PATCH mutated persisted legacy headers: %s", stored)
+	}
+}
+
 func TestManagementPatchContract(t *testing.T) {
 	f := newMgmtFixture(t, mgmtOptions{})
 	token, _ := f.createKey("full", "endpoints:write")
@@ -757,7 +874,7 @@ func TestManagementOrganizationPolicy(t *testing.T) {
 	wantProblem(t, f.do(http.MethodPatch, f.endpoint(created.ID), token,
 		`{"url":"https://example.test/other"}`, "If-Match", "*"), http.StatusForbidden, "organization_suspended", "")
 	wantProblem(t, f.do(http.MethodPatch, f.endpoint(created.ID), token,
-		`{"http_headers":{"x-a":"1"}}`, "If-Match", "*"), http.StatusForbidden, "organization_suspended", "")
+		`{"http_headers":{"x-tenant":"1"}}`, "If-Match", "*"), http.StatusForbidden, "organization_suspended", "")
 	wantProblem(t, f.do(http.MethodPatch, f.endpoint(created.ID), token, `{"status":"active"}`, "If-Match", "*"),
 		http.StatusForbidden, "organization_suspended", "")
 	wantProblem(t, f.do(http.MethodPost, f.endpoints(), token,

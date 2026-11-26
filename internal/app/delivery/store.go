@@ -22,6 +22,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+
+	"github.com/metamin44/hookflow/internal/modules/endpoint"
 )
 
 // Beginner is satisfied by *pgxpool.Pool and by pgx.Tx.
@@ -737,22 +739,7 @@ func validTransmittedHeader(name, value string) bool {
 }
 
 func sensitiveRequestHeader(name string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(name))
-	normalized = strings.ReplaceAll(normalized, "-", "")
-	normalized = strings.ReplaceAll(normalized, "_", "")
-	switch normalized {
-	case "authorization", "proxyauthorization", "cookie", "setcookie",
-		"xapikey", "apikey", "accesstoken", "refreshtoken", "idtoken",
-		"clientsecret", "password", "passwd", "secret", "credential", "credentials":
-		return true
-	default:
-		for _, marker := range []string{"authorization", "token", "secret", "password", "passwd", "apikey", "credential", "cookie"} {
-			if strings.Contains(normalized, marker) {
-				return true
-			}
-		}
-		return false
-	}
+	return endpoint.CredentialBearingHeader(name)
 }
 
 const completionUpdateSQL = `

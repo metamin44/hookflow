@@ -134,6 +134,17 @@ func splitList(value string) []string {
 // ensure creates the keyring only when it does not exist and validates every
 // existing file with the real File Provider.
 func ensure(w io.Writer, opts options) error {
+	root, err := findRepositoryRoot()
+	if err != nil {
+		return fmt.Errorf("locate repository root: %w", err)
+	}
+	return ensureWithRoot(w, opts, root)
+}
+
+func ensureWithRoot(w io.Writer, opts options, repositoryRoot string) error {
+	if err := validateKeyringLocation(opts.path, repositoryRoot); err != nil {
+		return err
+	}
 	info, err := os.Lstat(opts.path)
 	switch {
 	case err == nil:
@@ -149,6 +160,93 @@ func ensure(w io.Writer, opts options) error {
 	default:
 		return fmt.Errorf("inspect keyring path: %w", err)
 	}
+}
+
+func findRepositoryRoot() (string, error) {
+	current, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(current, ".git")); err == nil {
+			return current, nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", nil
+		}
+		current = parent
+	}
+}
+
+func validateKeyringLocation(path, repositoryRoot string) error {
+	if !filepath.IsAbs(path) || strings.ContainsAny(path, "\x00\r\n") {
+		return errors.New("keyring path must be an absolute native path without control characters")
+	}
+	if repositoryRoot == "" {
+		return nil
+	}
+	root, err := canonicalPath(repositoryRoot)
+	if err != nil {
+		return fmt.Errorf("resolve repository path: %w", err)
+	}
+	target, err := canonicalPath(path)
+	if err != nil {
+		return fmt.Errorf("resolve keyring path: %w", err)
+	}
+	inside, err := pathWithin(root, target)
+	if err != nil {
+		return fmt.Errorf("compare keyring path: %w", err)
+	}
+	if inside {
+		return errors.New("development keyring must stay outside the repository")
+	}
+	return nil
+}
+
+// canonicalPath resolves every existing symlink in the deepest existing prefix
+// and then reattaches the not-yet-created suffix.
+func canonicalPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	current := absolute
+	suffix := make([]string, 0)
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return filepath.Clean(absolute), nil
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
+}
+
+func pathWithin(root, target string) (bool, error) {
+	if !strings.EqualFold(filepath.VolumeName(root), filepath.VolumeName(target)) {
+		return false, nil
+	}
+	relative, err := filepath.Rel(root, target)
+	if err != nil {
+		return false, err
+	}
+	if relative == "." {
+		return true, nil
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative), nil
 }
 
 func generate(w io.Writer, opts options) error {

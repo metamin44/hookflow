@@ -269,7 +269,12 @@ func (s *Service) PatchEndpoint(ctx context.Context, identity Identity, meta Req
 				return conflict("active_endpoint_cap", "the organization has reached its active endpoint limit")
 			}
 		}
-		updated, err := endpoint.Update(ctx, tx, next)
+		var updated endpoint.Record
+		if patch.HeadersSet {
+			updated, err = endpoint.Update(ctx, tx, next)
+		} else {
+			updated, err = endpoint.UpdateMetadata(ctx, tx, next)
+		}
 		if err != nil {
 			if endpoint.IsDuplicateName(err) {
 				return conflict("endpoint_name_conflict", "a live endpoint with this name already exists")

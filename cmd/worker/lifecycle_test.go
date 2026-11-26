@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	workerruntime "github.com/metamin44/hookflow/internal/app/worker"
 	"github.com/metamin44/hookflow/internal/platform/config"
 	"github.com/metamin44/hookflow/internal/platform/kek"
 	"github.com/metamin44/hookflow/internal/platform/observability"
@@ -34,7 +35,8 @@ func (c *fakeComponent) Run(ctx context.Context) error {
 
 type fakeConsumer struct {
 	fakeComponent
-	start func(context.Context) error
+	start     func(context.Context) error
+	quiescent func() bool
 }
 
 func (c *fakeConsumer) Start(ctx context.Context) error {
@@ -42,6 +44,10 @@ func (c *fakeConsumer) Start(ctx context.Context) error {
 		return c.start(ctx)
 	}
 	return nil
+}
+
+func (c *fakeConsumer) Quiescent() bool {
+	return c.quiescent == nil || c.quiescent()
 }
 
 func testDatabaseConfig() (config.Config, error) {
@@ -253,6 +259,102 @@ func TestPoolCleanupCannotBypassOverallShutdownDeadline(t *testing.T) {
 	}
 	close(db.release)
 	<-db.finished
+}
+
+func TestRunLeavesPoolOpenWhenConsumerIsNotQuiescent(t *testing.T) {
+	deps, db, consumer := baseDependencies(t)
+	consumer.run = func(ctx context.Context) error {
+		<-ctx.Done()
+		return workerruntime.ErrShutdownIncomplete
+	}
+	consumer.quiescent = func() bool { return false }
+	started := make(chan struct{})
+	deps.onStarted = func() { close(started) }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, deps) }()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "pool left open") {
+			t.Fatalf("error = %v, want incomplete-shutdown pool safety error", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("run did not return after incomplete shutdown")
+	}
+	if db.closed != 0 {
+		t.Fatalf("pool closed %d times while consumer was non-quiescent", db.closed)
+	}
+}
+
+func TestRunTimeoutLeavesPoolOpenWhileConsumerRunMayAdmitWork(t *testing.T) {
+	deps, db, consumer := baseDependencies(t)
+	release := make(chan struct{})
+	runReturned := make(chan struct{})
+	consumer.run = func(context.Context) error {
+		defer close(runReturned)
+		<-release
+		return nil
+	}
+	consumer.quiescent = func() bool { return true }
+	deps.shutdownTimeout = 25 * time.Millisecond
+	started := make(chan struct{})
+	deps.onStarted = func() { close(started) }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, deps) }()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "pool left open") || !strings.Contains(err.Error(), "consumer run has not returned") {
+			t.Fatalf("error = %v, want timeout plus run-completion pool safety error", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown timeout did not return")
+	}
+	if db.closed != 0 {
+		t.Fatalf("pool closed %d times while settlement may still be active", db.closed)
+	}
+	close(release)
+	<-runReturned
+}
+
+func TestRunTimeoutLeavesPoolOpenWhileMaintenanceComponentMayBeActive(t *testing.T) {
+	deps, db, _ := baseDependencies(t)
+	release := make(chan struct{})
+	sweeperReturned := make(chan struct{})
+	deps.newSweeper = func(pool, config.IdempotencySweep, *slog.Logger) component {
+		return &fakeComponent{run: func(context.Context) error {
+			defer close(sweeperReturned)
+			<-release
+			return nil
+		}}
+	}
+	deps.shutdownTimeout = 25 * time.Millisecond
+	started := make(chan struct{})
+	deps.onStarted = func() { close(started) }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, deps) }()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "pool left open") || !strings.Contains(err.Error(), "database-using component has not returned") {
+			t.Fatalf("error = %v, want timeout plus maintenance pool safety error", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown timeout did not return")
+	}
+	if db.closed != 0 {
+		t.Fatalf("pool closed %d times while maintenance work was active", db.closed)
+	}
+	close(release)
+	<-sweeperReturned
 }
 
 func TestRunValidatesConfigurationBeforePool(t *testing.T) {

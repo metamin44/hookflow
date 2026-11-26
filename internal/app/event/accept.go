@@ -2,6 +2,7 @@ package eventapp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/metamin44/hookflow/internal/app/delivery"
 	"github.com/metamin44/hookflow/internal/app/idempotency"
 	"github.com/metamin44/hookflow/internal/app/outbox"
+	"github.com/metamin44/hookflow/internal/modules/endpoint"
 	"github.com/metamin44/hookflow/internal/modules/event"
 	"github.com/metamin44/hookflow/internal/modules/organization"
 )
@@ -193,6 +195,14 @@ func (s *Service) buildBatch(
 		if err != nil {
 			return nil, fmt.Errorf("generate outbox id: %w", err)
 		}
+		var storedHeaders map[string]string
+		if err := json.Unmarshal([]byte(destination.Headers), &storedHeaders); err != nil {
+			return nil, fmt.Errorf("decode destination headers: %w", err)
+		}
+		snapshotHeaders, err := json.Marshal(endpoint.SafeHeaders(storedHeaders))
+		if err != nil {
+			return nil, fmt.Errorf("encode delivery snapshot headers: %w", err)
+		}
 		if err := delivery.AppendAccepted(batch, delivery.Accepted{
 			ID:              deliveryID,
 			OrganizationID:  organizationID,
@@ -200,7 +210,7 @@ func (s *Service) buildBatch(
 			EndpointID:      destination.EndpointID,
 			SubscriptionID:  destination.SubscriptionID,
 			URL:             destination.URL,
-			Headers:         destination.Headers,
+			Headers:         string(snapshotHeaders),
 			SecretEncrypted: destination.SecretEncrypted,
 			NextAttemptAt:   t,
 		}); err != nil {

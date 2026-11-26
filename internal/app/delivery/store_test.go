@@ -214,12 +214,12 @@ func TestValidateOutcome(t *testing.T) {
 }
 
 func TestSanitizeRequestHeadersRedactsCredentialNames(t *testing.T) {
-	input := `{"Authorization":"Bearer private","X-Auth-Token":"private","X-Custom-Credential":"private","X-Trace":"visible"}`
+	input := `{"Authorization":"Bearer private","X-Auth-Token":"private","X-Auth-Key":"private","X-Pwd":"private","X-Custom-Credential":"private","X-Trace":"visible","X-Token-Count":"7"}`
 	got, err := sanitizeRequestHeaders(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(got, "private") || !strings.Contains(got, `"X-Trace":"visible"`) {
+	if strings.Contains(got, "private") || !strings.Contains(got, `"X-Trace":"visible"`) || !strings.Contains(got, `"X-Token-Count":"7"`) {
 		t.Fatalf("sanitized headers = %s", got)
 	}
 }

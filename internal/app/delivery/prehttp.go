@@ -33,13 +33,17 @@ const (
 	// ReasonDestinationDisallowed is permanent: the stored destination URL or a
 	// resolved address violates the approved SSRF policy.
 	ReasonDestinationDisallowed PreHTTPReason = "destination_disallowed"
+	// ReasonHeadersInvalid is permanent: the stored request-header snapshot is
+	// malformed and cannot be safely transmitted.
+	ReasonHeadersInvalid PreHTTPReason = "headers_invalid"
 )
 
 // Valid reports whether the reason is approved by this build.
 func (r PreHTTPReason) Valid() bool {
 	switch r {
 	case ReasonSecretUnavailable, ReasonSecretMissing, ReasonSecretInvalid,
-		ReasonProviderDisallowed, ReasonSigningInternal, ReasonDestinationDisallowed:
+		ReasonProviderDisallowed, ReasonSigningInternal, ReasonDestinationDisallowed,
+		ReasonHeadersInvalid:
 		return true
 	default:
 		return false

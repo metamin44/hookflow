@@ -53,7 +53,7 @@ The repository already contains the correct structural placeholders for D6 and U
 - **Unsigned delivery is gated.** An empty secret may use the unsigned path only when an explicit Development-only gate is enabled. Production, and any ambiguous configuration, fails closed with no HTTP. The gate is new configuration, not something the repository already has, so it is proposed as D6-F rather than assumed.
 - **Provider misconfiguration is a startup failure.** An invalid configured provider, allowlist, key file, or current `kid` stops the process at startup. Only the provider tag inside an individual stored envelope is classified per delivery (§4.5.1).
 - **KEK retirement is reference-based.** The documented retention is 90 days for `events` and `deliveries` and 72 hours for idempotency records (`database-schema.md` §6). Those are horizons, not permission to delete a KEK: a version stays decryptable while any retained endpoint envelope or delivery snapshot references it, and retirement requires a completed purge plus a bounded reference audit (§4.4).
-- **The lease invariant is exact.** `SecretResolutionBudget` is proposed at 2 s; `30 s > 10 + 2 + 3 + 10 + 2 = 27 s`; the residual 3 s is slack, not a sixth component. The Worker re-samples time after secret resolution instead of trusting a frozen remainder (§4.7).
+- **The lease invariant is exact.** `SecretResolutionBudget` is approved at 2 s; `30 s > 10 + 2 + 3 + 10 + 2 = 27 s`; the residual 3 s is slack, not a sixth component. The Worker re-samples time after secret resolution instead of trusting a frozen remainder (§4.7).
 
 **Owner decisions (approved).** Eleven grouped choices were put to the Owner: D6-A algorithm/envelope, D6-B DEK scope/AAD, D6-C custody/provider boundary and startup validation, D6-D reference-based rotation and retirement, D6-E pre-HTTP budget amendment, D6-F Development-only unsigned-delivery gate, D6-G pre-HTTP internal-failure disposition, U25-A algorithm/key usage, U25-B canonical input and headers, U25-C timestamp/replay/receiver compatibility, U25-D signing-key rotation. §8 states each with a recommended default, alternatives, and consequences, followed by the approval table. The Rev 2 text "every row is marked NOT APPROVED" was the pre-approval state; the Owner approved all eleven rows on 2026-11-24.
 
@@ -552,7 +552,7 @@ This is the approved B5 behavior with classification added; it is not a new disp
 
 **Why decryption stays after `PrepareHTTP`.** `PrepareHTTP` revalidates the fence and the lease before any expensive work. Decrypting earlier would either duplicate that validation or spend provider latency on a lease that is about to be found invalid.
 
-**Budget amendment (D6-E).** Add `SecretResolutionBudget` (recommended default 2 s, subject to Owner approval) as a fifth component of the required sum and of configuration validation:
+**Budget amendment (D6-E).** `SecretResolutionBudget` is approved at `2s` (`HOOKFLOW_WORKER_SECRET_RESOLUTION_BUDGET`) as a fifth component of the required sum and of configuration validation:
 
 ```
 LeaseDuration > HTTPDeadline + HandshakeBudget + PostProcessBudget

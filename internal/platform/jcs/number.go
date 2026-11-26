@@ -129,9 +129,9 @@ func trimZeros(d decimal) (string, int64) {
 }
 
 // parseDecimal splits an RFC 8259 number literal into D and p for
-// value = D × 10^p. D strips leading zeros and keeps trailing zeros. The
-// exponent is clamped after seven digits so attacker input cannot amplify
-// work.
+// value = D × 10^p. D strips leading zeros and keeps trailing zeros. Exponent
+// leading zeros are removed before the seven-digit clamp so spelling alone
+// cannot amplify work or change the represented value.
 func parseDecimal(literal []byte) (decimal, error) {
 	text := string(literal)
 	if text == "" {
@@ -182,6 +182,10 @@ func parseExponent(text string) (int64, error) {
 		if text[i] < '0' || text[i] > '9' {
 			return 0, errors.New("invalid exponent")
 		}
+	}
+	text = strings.TrimLeft(text, "0")
+	if text == "" {
+		return 0, nil
 	}
 	if len(text) > maxExponentDigits {
 		// Only the sign can affect any decision at this magnitude.

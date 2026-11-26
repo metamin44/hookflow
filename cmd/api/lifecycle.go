@@ -22,6 +22,7 @@ import (
 	"github.com/metamin44/hookflow/internal/platform/database"
 	platformhttp "github.com/metamin44/hookflow/internal/platform/http"
 	"github.com/metamin44/hookflow/internal/platform/kek"
+	"github.com/metamin44/hookflow/internal/platform/observability"
 	"github.com/metamin44/hookflow/internal/platform/secrets"
 )
 
@@ -38,17 +39,25 @@ type pool interface {
 // managementRoutes registers the Phase 6 routes on the API mux.
 type managementRoutes func(*http.ServeMux)
 
+type metricsServer interface {
+	Close(context.Context) error
+	Addr() string
+}
+
 type dependencies struct {
 	loadConfig           func() (config.Config, error)
 	loadAPIConfig        func() (config.API, error)
 	loadDeliverySecurity func() (config.DeliverySecurity, error)
 	loadEndpointLimits   func() (config.EndpointLimits, error)
+	loadMetricsAddr      func() (string, error)
 	newPool              func(context.Context, config.Database) (pool, error)
-	newManagement        func(pool, config.DeliverySecurity, config.EndpointLimits, *slog.Logger) (managementRoutes, error)
+	newManagement        func(pool, config.DeliverySecurity, config.EndpointLimits, *observability.Metrics, *slog.Logger) (managementRoutes, error)
 	listen               func(network, address string) (net.Listener, error)
+	startMetrics         func(context.Context, string, *observability.Metrics, *slog.Logger) (metricsServer, error)
 	logOutput            io.Writer
 	shutdownTimeout      time.Duration
 	onStarted            func(net.Listener)
+	onMetricsStarted     func(string)
 }
 
 func defaultDependencies() dependencies {
@@ -57,11 +66,15 @@ func defaultDependencies() dependencies {
 		loadAPIConfig:        config.LoadAPI,
 		loadDeliverySecurity: config.LoadDeliverySecurity,
 		loadEndpointLimits:   config.LoadEndpointLimits,
+		loadMetricsAddr:      config.LoadMetricsAddr,
 		newPool: func(ctx context.Context, cfg config.Database) (pool, error) {
 			return database.NewPool(ctx, cfg)
 		},
-		newManagement:   defaultManagementRoutes,
-		listen:          net.Listen,
+		newManagement: defaultManagementRoutes,
+		listen:        net.Listen,
+		startMetrics: func(ctx context.Context, address string, metrics *observability.Metrics, logger *slog.Logger) (metricsServer, error) {
+			return observability.StartServer(ctx, address, metrics, logger)
+		},
 		logOutput:       os.Stdout,
 		shutdownTimeout: defaultShutdownTimeout,
 	}
@@ -69,7 +82,7 @@ func defaultDependencies() dependencies {
 
 // defaultManagementRoutes builds the Phase 6 management handler from the
 // existing pool, the development file provider and the endpoint ceiling.
-func defaultManagementRoutes(p pool, security config.DeliverySecurity, limits config.EndpointLimits, logger *slog.Logger) (managementRoutes, error) {
+func defaultManagementRoutes(p pool, security config.DeliverySecurity, limits config.EndpointLimits, metrics *observability.Metrics, logger *slog.Logger) (managementRoutes, error) {
 	rawPool, ok := p.(interface{ Raw() *pgxpool.Pool })
 	if !ok {
 		return nil, errors.New("management routes require the PostgreSQL pool")
@@ -89,9 +102,7 @@ func defaultManagementRoutes(p pool, security config.DeliverySecurity, limits co
 	if err != nil {
 		return nil, err
 	}
-	// The API process has no metrics registry; the approved inexact-number
-	// counter therefore stays nil here and is emitted only where a registry exists.
-	ingester, err := eventapp.NewService(rawPool.Raw(), eventapp.Options{Logger: logger})
+	ingester, err := eventapp.NewService(rawPool.Raw(), eventapp.Options{Metrics: metrics, Logger: logger})
 	if err != nil {
 		return nil, err
 	}
@@ -102,36 +113,57 @@ func defaultManagementRoutes(p pool, security config.DeliverySecurity, limits co
 	return handler.Register, nil
 }
 
-func run(ctx context.Context, deps dependencies) error {
+type apiStartupConfig struct {
+	database    config.Database
+	api         config.API
+	security    config.DeliverySecurity
+	limits      config.EndpointLimits
+	metricsAddr string
+}
+
+func loadAPIStartupConfig(deps dependencies) (apiStartupConfig, error) {
+	var startup apiStartupConfig
+	var err error
 	cfg, err := deps.loadConfig()
 	if err != nil {
-		return fmt.Errorf("load database configuration: %w", err)
+		return startup, fmt.Errorf("load database configuration: %w", err)
 	}
-
-	apiCfg, err := deps.loadAPIConfig()
+	startup.database = cfg.Database
+	startup.api, err = deps.loadAPIConfig()
 	if err != nil {
-		return fmt.Errorf("load API configuration: %w", err)
+		return startup, fmt.Errorf("load API configuration: %w", err)
 	}
-
-	security, err := deps.loadDeliverySecurity()
+	startup.security, err = deps.loadDeliverySecurity()
 	if err != nil {
-		return fmt.Errorf("load delivery security configuration: %w", err)
+		return startup, fmt.Errorf("load delivery security configuration: %w", err)
 	}
-
-	limits, err := deps.loadEndpointLimits()
+	startup.limits, err = deps.loadEndpointLimits()
 	if err != nil {
-		return fmt.Errorf("load endpoint limits: %w", err)
+		return startup, fmt.Errorf("load endpoint limits: %w", err)
 	}
+	startup.metricsAddr, err = deps.loadMetricsAddr()
+	if err != nil {
+		return startup, fmt.Errorf("load metrics configuration: %w", err)
+	}
+	return startup, nil
+}
+
+func run(ctx context.Context, deps dependencies) error {
+	startup, err := loadAPIStartupConfig(deps)
+	if err != nil {
+		return err
+	}
+	metrics := observability.New()
 
 	logOutput := deps.logOutput
 	if logOutput == nil {
 		logOutput = os.Stdout
 	}
 	logger := slog.New(slog.NewJSONHandler(logOutput, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	logger.Info("starting API", "addr", apiCfg.Addr)
+	logger.Info("starting API", "addr", startup.api.Addr)
 
 	startupCtx, cancelStartup := context.WithTimeout(ctx, startupTimeout)
-	dbPool, err := deps.newPool(startupCtx, cfg.Database)
+	dbPool, err := deps.newPool(startupCtx, startup.database)
 	cancelStartup()
 	if err != nil {
 		logger.Error("PostgreSQL initialization failed", "error", err)
@@ -150,7 +182,7 @@ func run(ctx context.Context, deps dependencies) error {
 
 	logger.Info("PostgreSQL pool initialized")
 
-	routes, err := deps.newManagement(dbPool, security, limits, logger)
+	routes, err := deps.newManagement(dbPool, startup.security, startup.limits, metrics, logger)
 	if err != nil {
 		logger.Error("management route initialization failed", "error", err)
 		return fmt.Errorf("initialize management routes: %w", err)
@@ -159,12 +191,22 @@ func run(ctx context.Context, deps dependencies) error {
 	router := http.NewServeMux()
 	router.Handle("/", platformhttp.NewHandler(dbPool, logger))
 	routes(router)
-	server := platformhttp.NewServer(apiCfg.Addr, router, logger)
+	server := platformhttp.NewServer(startup.api.Addr, router, logger)
 
-	listener, err := deps.listen("tcp", apiCfg.Addr)
+	listener, err := deps.listen("tcp", startup.api.Addr)
 	if err != nil {
-		logger.Error("HTTP listen failed", "addr", apiCfg.Addr, "error", err)
-		return fmt.Errorf("listen on %s: %w", apiCfg.Addr, err)
+		logger.Error("HTTP listen failed", "addr", startup.api.Addr, "error", err)
+		return fmt.Errorf("listen on %s: %w", startup.api.Addr, err)
+	}
+
+	metricsHandle, err := startOptionalMetrics(ctx, deps, startup.metricsAddr, metrics, logger)
+	if err != nil {
+		_ = listener.Close()
+		logger.Error("metrics listener startup failed", "error", err)
+		return fmt.Errorf("start API metrics listener: %w", err)
+	}
+	if metricsHandle != nil && deps.onMetricsStarted != nil {
+		deps.onMetricsStarted(metricsHandle.Addr())
 	}
 
 	serveErr := make(chan error, 1)
@@ -180,8 +222,16 @@ func run(ctx context.Context, deps dependencies) error {
 	select {
 	case <-ctx.Done():
 		logger.Info("shutdown requested")
-		return shutdown(server, serveErr, closePool, deps.shutdownTimeout, logger)
+		return shutdown(server, metricsHandle, serveErr, closePool, deps.shutdownTimeout, logger)
 	case err := <-serveErr:
+		if metricsHandle != nil {
+			metricsCtx, cancelMetrics := context.WithTimeout(context.Background(), deps.shutdownTimeout)
+			metricsErr := metricsHandle.Close(metricsCtx)
+			cancelMetrics()
+			if metricsErr != nil {
+				logger.Error("metrics listener close failed", "error", metricsErr)
+			}
+		}
 		closePool()
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("HTTP server failed", "error", err)
@@ -191,7 +241,14 @@ func run(ctx context.Context, deps dependencies) error {
 	}
 }
 
-func shutdown(server *http.Server, serveErr <-chan error, closePool func(), timeout time.Duration, logger *slog.Logger) error {
+func startOptionalMetrics(ctx context.Context, deps dependencies, address string, metrics *observability.Metrics, logger *slog.Logger) (metricsServer, error) {
+	if address == "" {
+		return nil, nil
+	}
+	return deps.startMetrics(ctx, address, metrics, logger)
+}
+
+func shutdown(server *http.Server, metrics metricsServer, serveErr <-chan error, closePool func(), timeout time.Duration, logger *slog.Logger) error {
 	if timeout <= 0 {
 		timeout = defaultShutdownTimeout
 	}
@@ -205,6 +262,9 @@ func shutdown(server *http.Server, serveErr <-chan error, closePool func(), time
 		if closeErr := server.Close(); closeErr != nil {
 			shutdownErr = errors.Join(shutdownErr, closeErr)
 		}
+	}
+	if metrics != nil {
+		shutdownErr = errors.Join(shutdownErr, metrics.Close(ctx))
 	}
 
 	if err := <-serveErr; err != nil && !errors.Is(err, http.ErrServerClosed) {

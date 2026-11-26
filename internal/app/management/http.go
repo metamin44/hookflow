@@ -110,10 +110,10 @@ func (h *Handler) createEndpoint(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
-	representation := record.Represent()
-	setETag(w, representation, record.SecretEncrypted)
+	fullRepresentation := record.Represent()
+	setETag(w, fullRepresentation, record.SecretEncrypted)
 	w.Header().Set("Location", endpointLocation(record.OrganizationID, record.ID))
-	writeJSON(w, http.StatusCreated, createEndpointResponse{Representation: representation, Secret: secret})
+	writeJSON(w, http.StatusCreated, createEndpointResponse{Representation: record.RedactedRepresent(), Secret: secret})
 }
 
 func (h *Handler) listEndpoints(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +132,7 @@ func (h *Handler) listEndpoints(w http.ResponseWriter, r *http.Request) {
 	}
 	documents := make([]endpoint.Representation, 0, len(records))
 	for _, record := range records {
-		documents = append(documents, record.Represent())
+		documents = append(documents, record.RedactedRepresent())
 	}
 	writeJSON(w, http.StatusOK, endpointsResponse{Endpoints: documents})
 }
@@ -151,9 +151,9 @@ func (h *Handler) getEndpoint(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
-	representation := record.Represent()
-	setETag(w, representation, record.SecretEncrypted)
-	writeJSON(w, http.StatusOK, representation)
+	fullRepresentation := record.Represent()
+	setETag(w, fullRepresentation, record.SecretEncrypted)
+	writeJSON(w, http.StatusOK, record.RedactedRepresent())
 }
 
 func (h *Handler) patchEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -181,9 +181,9 @@ func (h *Handler) patchEndpoint(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, err)
 		return
 	}
-	representation := result.Record.Represent()
-	setETag(w, representation, result.Record.SecretEncrypted)
-	writeJSON(w, http.StatusOK, representation)
+	fullRepresentation := result.Record.Represent()
+	setETag(w, fullRepresentation, result.Record.SecretEncrypted)
+	writeJSON(w, http.StatusOK, result.Record.RedactedRepresent())
 }
 
 func (h *Handler) deleteEndpoint(w http.ResponseWriter, r *http.Request) {

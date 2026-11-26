@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -40,6 +41,7 @@ type component interface {
 type consumerComponent interface {
 	component
 	Start(context.Context) error
+	Quiescent() bool
 }
 
 type metricsServer interface {
@@ -119,6 +121,7 @@ func defaultDependencies() dependencies {
 				Deadline: cfg.HTTPDeadline, HandshakeBudget: cfg.HandshakeBudget,
 				PostProcessBudget: cfg.PostProcessBudget, ShutdownReserve: cfg.ShutdownReserve,
 				ResponseBodyLimit: cfg.ResponseBodyLimit,
+				Metrics:           metrics,
 			}, signing.New(), logger)
 			if err != nil {
 				return nil, err
@@ -148,6 +151,39 @@ func defaultDependencies() dependencies {
 // cleanup. It must remain live while both component draining and pool closing run.
 func newShutdownContext(timeout time.Duration) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), timeout)
+}
+
+func isClosed(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+func closeWorkerResources(ctx context.Context, db pool, metrics metricsServer, consumer consumerComponent, consumerDone, componentsDone <-chan struct{}) error {
+	var closeErr error
+	if metrics != nil {
+		closeErr = errors.Join(closeErr, metrics.Close(ctx))
+	}
+	if consumer != nil && consumerDone != nil && !isClosed(consumerDone) {
+		return errors.Join(closeErr, errors.New("shutdown worker: PostgreSQL pool left open because consumer run has not returned"))
+	}
+	if consumer != nil && !consumer.Quiescent() {
+		return errors.Join(closeErr, errors.New("shutdown worker: PostgreSQL pool left open because tracked settlement remains active"))
+	}
+	if componentsDone != nil && !isClosed(componentsDone) {
+		return errors.Join(closeErr, errors.New("shutdown worker: PostgreSQL pool left open because a database-using component has not returned"))
+	}
+	closed := make(chan struct{})
+	go func() { db.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-ctx.Done():
+		closeErr = errors.Join(closeErr, errors.New("shutdown worker: PostgreSQL pool cleanup exceeded the overall deadline"))
+	}
+	return closeErr
 }
 
 type failedComponent struct{ err error }
@@ -264,24 +300,18 @@ func run(ctx context.Context, deps dependencies) (runErr error) {
 	var shutdownCtx context.Context
 	var cancelShutdown context.CancelFunc
 	var metricsHandle metricsServer
+	var consumer consumerComponent
+	var consumerDone chan struct{}
+	var componentsDone chan struct{}
 	defer func() {
 		if shutdownCtx == nil {
 			shutdownCtx, cancelShutdown = newShutdownContext(timeout)
 		}
 		defer cancelShutdown()
-		if metricsHandle != nil {
-			runErr = errors.Join(runErr, metricsHandle.Close(shutdownCtx))
-		}
-		closed := make(chan struct{})
-		go func() { db.Close(); close(closed) }()
-		select {
-		case <-closed:
-		case <-shutdownCtx.Done():
-			runErr = errors.Join(runErr, errors.New("shutdown worker: PostgreSQL pool cleanup exceeded the overall deadline"))
-		}
+		runErr = errors.Join(runErr, closeWorkerResources(shutdownCtx, db, metricsHandle, consumer, consumerDone, componentsDone))
 	}()
 
-	consumer, err := deps.newConsumer(startupCtx, db, startup.deliveryCfg, startup.securityCfg, startup.provider, startup.rabbitCfg, logger, metrics)
+	consumer, err = deps.newConsumer(startupCtx, db, startup.deliveryCfg, startup.securityCfg, startup.provider, startup.rabbitCfg, logger, metrics)
 	if err != nil {
 		cancelStartup()
 		return fmt.Errorf("initialize worker consumer: %w", err)
@@ -301,9 +331,25 @@ func run(ctx context.Context, deps dependencies) (runErr error) {
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	errorsCh := make(chan error, 3)
-	go func() { errorsCh <- consumer.Run(runCtx) }()
-	go func() { errorsCh <- recoveryRunner.Run(runCtx) }()
-	go func() { errorsCh <- sweeper.Run(runCtx) }()
+	consumerDone = make(chan struct{})
+	componentsDone = make(chan struct{})
+	var componentsRemaining atomic.Int32
+	componentsRemaining.Store(3)
+	finishComponent := func(err error) {
+		if componentsRemaining.Add(-1) == 0 {
+			close(componentsDone)
+		}
+		errorsCh <- err
+	}
+	go func() {
+		// Publish completion before the result so deferred pool cleanup cannot
+		// observe a returned consumer that has not yet been marked stopped.
+		err := consumer.Run(runCtx)
+		close(consumerDone)
+		finishComponent(err)
+	}()
+	go func() { finishComponent(recoveryRunner.Run(runCtx)) }()
+	go func() { finishComponent(sweeper.Run(runCtx)) }()
 	if deps.onStarted != nil {
 		deps.onStarted()
 	}

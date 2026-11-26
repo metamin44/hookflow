@@ -11,6 +11,8 @@ func FuzzCanonicalize(f *testing.F) {
 	seeds := [][]byte{
 		[]byte(`{"a":1,"b":[true,null,"x"]}`),
 		[]byte(`{"n":1.200e1}`),
+		[]byte(`{"n":1e0000000001}`),
+		[]byte(`{"n":1e-0000000001}`),
 		[]byte(`{"n":1e-400}`),
 		[]byte(`{"n":9007199254740992.5}`),
 		[]byte(`{"a":"\ud800"}`),

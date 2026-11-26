@@ -538,7 +538,7 @@ Rotation issues a new row and revokes the old one rather than mutating `secret_h
 | `url` | `text` | NN, CHK `~ '^https://[^[:space:]]+$'` | HTTPS-only, POST-only destinations (U13: private/loopback policy unresolved) |
 | `secret_encrypted` | `text` | NN | **reversible** ciphertext of the webhook signing secret; envelope format open (§4.5.1, U6) |
 | `signing_scheme` | `text` | NN, default `hmac_sha256` | |
-| `http_headers` | `jsonb` | NN, default `{}` | extra static headers; must exclude credential-bearing keys (application rule) |
+| `http_headers` | `jsonb` | NN, default `{}` | extra static headers; new writes use the explicit six-name allowlist and credential classifier; historical rows are redacted in API responses and filtered before new snapshots/transmission without rewriting |
 | `status` | `text` | NN, default `active`, CHK `active`/`paused` | `paused` stops new deliveries, keeps history |
 | `timeout_ms` | `integer` | NN, default `5000`, CHK 250–30000 | per-destination HTTP timeout |
 | `max_attempts` | `integer` | NULL, CHK 1–20 | NULL = organization/global default |
@@ -872,7 +872,7 @@ value; the fingerprint is computed from RFC 8785 JCS of the validated document, 
 | `endpoint_id` | `uuid` | NN | composite-FK'd to `endpoints (organization_id, id)` |
 | `endpoint_subscription_id` | `uuid` | NULL, composite FK → `endpoint_subscriptions (organization_id, id)` `SET NULL (endpoint_subscription_id)` | provenance pointer to the rule that matched; nullable and may be cleared when the subscription is deleted, which leaves the delivery snapshot and the delivery itself untouched (F3-C, U12) |
 | `url` | `text` | NN | **snapshot column** — destination URL exactly as it stood when the event was accepted |
-| `http_headers` | `jsonb` | NN, default `{}` | **snapshot column** — static headers as accepted |
+| `http_headers` | `jsonb` | NN, default `{}` | **snapshot column** — immutable static headers as accepted; new snapshots omit sensitive/unsupported endpoint headers and the Worker filters recognized legacy credential headers at send time |
 | `secret_encrypted` | `text` | NN | **snapshot column** — encrypted signing secret as accepted (§4.5.1; copy-to-delivery approved by A8). It is immutable after acceptance and **must not be rewrapped** under the Owner-approved D6-D; the D6/U25 envelope/custody architecture is approved and implemented in development, while production custody is absent |
 | `state` | `text` | NN, default `pending`, CHK `pending`/`retrying`/`succeeded`/`failed`/`expired` | |
 | `dispatch_seq` | `integer` | NN, CHK ≥ 1, no default | generation of the dispatch intent; initial value 1, incremented per retry (A2) |
@@ -932,7 +932,7 @@ counter is kept while the status column is not.
 | `request_method` | `text` | NN, default `POST` | |
 | `request_url` | `text` | NN | URL actually used, for post-hoc forensics |
 | `request_headers` | `jsonb` | NN, default `{}` | signature/timestamp headers kept; secret-bearing headers redacted before write |
-| `response_status` | `integer` | NULL, CHK 100–599 | NULL = no response |
+| `response_status` | `integer` | NULL, CHK 100–599 | NULL when no response was observed or when an executed request received an out-of-range protocol status that cannot be represented by this constraint |
 | `response_headers` | `jsonb` | NULL | `Retry-After` preserved for audit |
 | `response_body_snippet` | `text` | NULL, CHK ≤ 2000 | truncated, only when capture is enabled |
 | `outcome` | `text` | NN, CHK `success`/`retryable_failure`/`terminal_failure` | completion-only; no `pending` row (U18/A4) |
@@ -949,7 +949,10 @@ deliveries (organization_id, id) ON DELETE CASCADE`; `idx_attempts_org_started O
 
 A row is written once, at completion. U18 approved write-on-completion: no row is written at claim or
 start, and a crash after the remote request but before commit may leave no row; absence of a row is not
-proof that no HTTP request occurred. The insert supplies the observed start time explicitly.
+proof that no HTTP request occurred. The insert supplies the observed start time explicitly. If Go exposes a
+response status outside `100..599` after a request was executed, the Worker writes one `terminal_failure`
+attempt with `response_status = NULL` and a bounded `http_status` diagnostic, then terminalizes the Delivery
+without a retry; the database constraint is not weakened.
 
 ### 4.10 `outbox_messages` — transactional outbox
 

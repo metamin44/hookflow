@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -20,10 +21,118 @@ import (
 )
 
 // Processor establishes a durable DB disposition for one delivery. The consumer
-// applies the returned broker action only after Process returns.
+// applies the returned broker action only after Process returns. Implementations
+// must honor ctx for every database operation; the production Runtime also uses
+// the per-work synchronized settlement gate carried by ctx.
 type Processor interface {
 	Process(context.Context, *Handle) disposition.Decision
 }
+
+type settlementForceContextKey struct{}
+type settlementWorkKey struct{}
+
+func settlementForceContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return nil
+	}
+	force, _ := ctx.Value(settlementForceContextKey{}).(context.Context)
+	return force
+}
+
+func settlementWork(ctx context.Context) *processorWork {
+	if ctx == nil {
+		return nil
+	}
+	work, _ := ctx.Value(settlementWorkKey{}).(*processorWork)
+	return work
+}
+
+type workState uint8
+
+const (
+	workActive workState = iota
+	workSettlementStarted
+	workForced
+	workFinished
+)
+
+// processorWork is the single synchronization point for settlement admission
+// and force-stop. Admission and force-stop cannot both win the state transition.
+type processorWork struct {
+	mu          sync.Mutex
+	state       workState
+	cancel      context.CancelFunc
+	forceCancel context.CancelFunc
+}
+
+func (w *processorWork) admitSettlement() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.state == workForced || w.state == workFinished {
+		return false
+	}
+	w.state = workSettlementStarted
+	return true
+}
+
+func (w *processorWork) forceStop() {
+	w.mu.Lock()
+	if w.state != workFinished {
+		w.state = workForced
+	}
+	w.mu.Unlock()
+	w.forceCancel()
+	w.cancel()
+}
+
+func (w *processorWork) finish() {
+	w.mu.Lock()
+	w.state = workFinished
+	w.mu.Unlock()
+}
+
+// workTracker owns every processor goroutine that can still begin database or
+// broker settlement. Force-stop cancels both the work deadline and the separate
+// pre-HTTP settlement signal before Consumer.Run may return.
+type workTracker struct {
+	mu    sync.Mutex
+	works map[*processorWork]struct{}
+}
+
+func newWorkTracker() *workTracker {
+	return &workTracker{works: make(map[*processorWork]struct{})}
+}
+
+func (t *workTracker) add(cancel, forceCancel context.CancelFunc) *processorWork {
+	work := &processorWork{cancel: cancel, forceCancel: forceCancel}
+	t.mu.Lock()
+	t.works[work] = struct{}{}
+	t.mu.Unlock()
+	return work
+}
+
+func (t *workTracker) remove(work *processorWork) {
+	t.mu.Lock()
+	delete(t.works, work)
+	t.mu.Unlock()
+}
+
+func (t *workTracker) forceStop() {
+	t.mu.Lock()
+	works := make([]*processorWork, 0, len(t.works))
+	for work := range t.works {
+		works = append(works, work)
+	}
+	t.mu.Unlock()
+	for _, work := range works {
+		work.forceStop()
+	}
+}
+
+// ErrShutdownIncomplete reports that force-stop could not drain tracked work
+// before the bounded deadline. Callers must not close a database pool underneath
+// the remaining processors.
+var ErrShutdownIncomplete = errors.New("worker shutdown incomplete: tracked settlement remains active")
 
 // Consumer owns application-managed reconnection. Automatic amqp091-go recovery
 // is disabled so no delivery tag can silently migrate to a replacement channel.
@@ -35,6 +144,13 @@ type Consumer struct {
 	logger     *slog.Logger
 	metrics    *observability.Metrics
 	attempt    int
+	inFlight   atomic.Int64
+}
+
+// Quiescent reports whether every tracked processor and admitted settlement has
+// returned. It is safe to consult before explicit PostgreSQL pool cleanup.
+func (c *Consumer) Quiescent() bool {
+	return c != nil && c.inFlight.Load() == 0
 }
 
 // NewConsumer validates the broker, prefetch and processor.
@@ -106,6 +222,9 @@ func (c *Consumer) openGeneration(ctx context.Context) (*amqp.Connection, *chann
 		return nil, nil, fmt.Errorf("configure worker QoS: %w", err)
 	}
 	generation := &channelGeneration{channel: channel, conn: conn, closeBudget: c.cfg.ConnectTimeout}
+	generation.closeChannel = func() error {
+		return messaging.CloseChannelAndConnection(conn, channel, c.cfg.ConnectTimeout)
+	}
 	c.logger.Info("worker channel generation configured", "prefetch", c.prefetch)
 	return conn, generation, nil
 }
@@ -134,6 +253,9 @@ func (c *Consumer) Run(ctx context.Context) error {
 		generation.close()
 		_ = conn.Close()
 		c.metrics.Set("hookflow_worker_ready", 0)
+		if !c.Quiescent() {
+			return fmt.Errorf("%w: force-stop drain exhausted", ErrShutdownIncomplete)
+		}
 		if graceful || ctx.Err() != nil {
 			return nil //nolint:nilerr // A closed generation during shutdown is expected.
 		}
@@ -172,56 +294,80 @@ func (c *Consumer) consumeGeneration(ctx context.Context) (*amqp.Connection, *ch
 func (c *Consumer) runGeneration(ctx context.Context, generation *channelGeneration, deliveries <-chan amqp.Delivery) bool {
 	semaphore := make(chan struct{}, c.prefetch)
 	var wait sync.WaitGroup
+	tracker := newWorkTracker()
 	stop := make(chan struct{})
 	var stopOnce sync.Once
 
 	for {
 		select {
 		case <-stop:
-			c.waitInFlight(&wait, "generation stop")
+			c.waitInFlight(&wait, tracker, "generation stop")
 			return false
 		default:
 		}
 		select {
 		case <-ctx.Done():
 			stopOnce.Do(func() { close(stop) })
-			c.waitInFlight(&wait, "shutdown")
+			c.waitInFlight(&wait, tracker, "shutdown")
 			return true
 		case <-stop:
-			c.waitInFlight(&wait, "generation stop")
+			c.waitInFlight(&wait, tracker, "generation stop")
 			return false
 		case delivery, open := <-deliveries:
 			if !open {
 				stopOnce.Do(func() { close(stop) })
-				c.waitInFlight(&wait, "channel close")
+				c.waitInFlight(&wait, tracker, "channel close")
 				return false
 			}
 			select {
 			case semaphore <- struct{}{}:
 			case <-stop:
-				c.waitInFlight(&wait, "generation stop")
+				c.waitInFlight(&wait, tracker, "generation stop")
 				return false
+			case <-ctx.Done():
+				stopOnce.Do(func() { close(stop) })
+				c.waitInFlight(&wait, tracker, "shutdown")
+				return true
 			}
 			select {
 			case <-stop:
 				<-semaphore
-				c.waitInFlight(&wait, "generation stop")
+				c.waitInFlight(&wait, tracker, "generation stop")
 				return false
+			case <-ctx.Done():
+				<-semaphore
+				stopOnce.Do(func() { close(stop) })
+				c.waitInFlight(&wait, tracker, "shutdown")
+				return true
 			default:
 			}
 			wait.Add(1)
+			// Register work before launching its goroutine so force-stop cannot
+			// miss a delivery whose processor has not yet been scheduled.
+			workCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.workBudget)
+			forceCtx, forceCancel := context.WithCancel(context.WithoutCancel(ctx))
+			workCtx = context.WithValue(workCtx, settlementForceContextKey{}, forceCtx)
+			work := tracker.add(cancel, forceCancel)
+			workCtx = context.WithValue(workCtx, settlementWorkKey{}, work)
+			c.inFlight.Add(1)
 			c.metrics.Add("hookflow_worker_in_flight", 1)
 			c.metrics.Add("hookflow_worker_consumed_total", 1)
 			go func() {
 				defer wait.Done()
+				defer c.inFlight.Add(-1)
+				defer work.finish()
+				defer tracker.remove(work)
+				defer cancel()
+				defer forceCancel()
 				defer func() { <-semaphore }()
 				defer c.metrics.Add("hookflow_worker_in_flight", -1)
-				workCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.workBudget)
-				defer cancel()
 				stopWatch := messaging.WatchConnectionContext(workCtx, generation.conn)
 				defer stopWatch()
 				handle := newHandle(generation, delivery)
 				decision := c.processor.Process(workCtx, handle)
+				if !work.admitSettlement() {
+					return // Force-stop leaves the broker delivery unsettled.
+				}
 				settlementFailed := c.apply(decision, handle)
 				if decision.Action == disposition.ActionHold || settlementFailed {
 					stopOnce.Do(func() { close(stop) })
@@ -231,7 +377,7 @@ func (c *Consumer) runGeneration(ctx context.Context, generation *channelGenerat
 	}
 }
 
-func (c *Consumer) waitInFlight(wait *sync.WaitGroup, reason string) {
+func (c *Consumer) waitInFlight(wait *sync.WaitGroup, tracker *workTracker, reason string) bool {
 	finished := make(chan struct{})
 	go func() {
 		wait.Wait()
@@ -241,9 +387,30 @@ func (c *Consumer) waitInFlight(wait *sync.WaitGroup, reason string) {
 	defer timer.Stop()
 	select {
 	case <-finished:
+		return true
 	case <-timer.C:
-		c.logger.Warn("worker in-flight budget exhausted; closing channel to requeue", "reason", reason)
+		tracker.forceStop()
+		c.logger.Warn("worker in-flight budget exhausted; forcing cancellation before channel requeue", "reason", reason)
 	}
+
+	// Force-stop atomically closes settlement admission. This second bounded
+	// window lets admitted work actually return before the pool may be closed.
+	forceTimer := time.NewTimer(c.forceDrainBudget())
+	defer forceTimer.Stop()
+	select {
+	case <-finished:
+		return true
+	case <-forceTimer.C:
+		c.logger.Error("worker processor force-stop drain exhausted; unsettled messages remain unacknowledged", "reason", reason)
+		return false
+	}
+}
+
+func (c *Consumer) forceDrainBudget() time.Duration {
+	if c.workBudget < preHTTPSettlementTimeout {
+		return c.workBudget
+	}
+	return preHTTPSettlementTimeout
 }
 
 func (c *Consumer) apply(decision disposition.Decision, handle *Handle) bool {

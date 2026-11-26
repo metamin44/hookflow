@@ -1,18 +1,20 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/metamin44/hookflow/internal/platform/kek"
 )
 
-func approvedSecurity() DeliverySecurity {
+func approvedSecurity(t *testing.T) DeliverySecurity {
+	t.Helper()
 	return DeliverySecurity{
 		Mode:                  ModeDevelopment,
 		AllowUnsignedDelivery: true,
 		Provider:              kek.ProviderLocalFile,
-		KeyringPath:           "/etc/hookflow/dev-keyring.json",
+		KeyringPath:           filepath.Join(t.TempDir(), "dev-keyring.json"),
 		CurrentKID:            "dev-2026-11",
 		AllowedKIDs:           []string{"dev-2026-11", "dev-2026-10"},
 		AllowedProviders:      []string{kek.ProviderLocalFile},
@@ -20,7 +22,7 @@ func approvedSecurity() DeliverySecurity {
 }
 
 func TestDeliverySecurityValidateMatrix(t *testing.T) {
-	if err := approvedSecurity().Validate(); err != nil {
+	if err := approvedSecurity(t).Validate(); err != nil {
 		t.Fatalf("approved development security rejected: %v", err)
 	}
 
@@ -39,6 +41,8 @@ func TestDeliverySecurityValidateMatrix(t *testing.T) {
 		{"missing provider", func(s *DeliverySecurity) { s.Provider = "" }, "provider selector"},
 		{"unknown provider", func(s *DeliverySecurity) { s.Provider = "kms" }, "not implemented"},
 		{"missing keyring", func(s *DeliverySecurity) { s.KeyringPath = "" }, "keyring path"},
+		{"relative keyring", func(s *DeliverySecurity) { s.KeyringPath = "keys/dev-keyring.json" }, "absolute native path"},
+		{"malformed keyring", func(s *DeliverySecurity) { s.KeyringPath = approvedSecurity(t).KeyringPath + "\x00" }, "absolute native path"},
 		{"missing current kid", func(s *DeliverySecurity) { s.CurrentKID = "" }, "current kid"},
 		{"empty kid allowlist", func(s *DeliverySecurity) { s.AllowedKIDs = nil }, "kid allowlist"},
 		{"empty kid entry", func(s *DeliverySecurity) { s.AllowedKIDs = []string{"dev-2026-11", " "} }, "empty entry"},
@@ -49,7 +53,7 @@ func TestDeliverySecurityValidateMatrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			security := approvedSecurity()
+			security := approvedSecurity(t)
 			tc.mutate(&security)
 			err := security.Validate()
 			if err == nil || !strings.Contains(err.Error(), tc.contains) {
@@ -60,7 +64,7 @@ func TestDeliverySecurityValidateMatrix(t *testing.T) {
 }
 
 func TestDeliverySecurityProviderSelection(t *testing.T) {
-	security := approvedSecurity()
+	security := approvedSecurity(t)
 	if !security.UnsignedAllowed() {
 		t.Fatal("development gate is not enabled")
 	}
@@ -84,7 +88,7 @@ func TestLoadDeliverySecurityFromEnvironment(t *testing.T) {
 		EnvDeploymentMode:        "development",
 		EnvAllowUnsignedDelivery: "true",
 		EnvSecretProvider:        "file",
-		EnvSecretKeyringPath:     " /tmp/ring.json ",
+		EnvSecretKeyringPath:     " " + filepath.Join(t.TempDir(), "ring.json") + " ",
 		EnvSecretCurrentKID:      "dev-2",
 		EnvSecretAllowedKIDs:     " dev-2, dev-1 ,dev-2, ",
 		EnvSecretAllowedProvider: "file,file",
@@ -93,7 +97,7 @@ func TestLoadDeliverySecurityFromEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadDeliverySecurity() error: %v", err)
 	}
-	if security.KeyringPath != "/tmp/ring.json" || security.CurrentKID != "dev-2" {
+	if !filepath.IsAbs(security.KeyringPath) || security.CurrentKID != "dev-2" {
 		t.Fatalf("security = %+v", security)
 	}
 	if len(security.AllowedKIDs) != 2 || security.AllowedKIDs[0] != "dev-2" || security.AllowedKIDs[1] != "dev-1" {
@@ -112,7 +116,7 @@ func TestLoadDeliverySecurityRejectsInvalidEnvironment(t *testing.T) {
 		return map[string]string{
 			EnvDeploymentMode:        "development",
 			EnvSecretProvider:        "file",
-			EnvSecretKeyringPath:     "/tmp/ring.json",
+			EnvSecretKeyringPath:     filepath.Join(t.TempDir(), "ring.json"),
 			EnvSecretCurrentKID:      "dev-2",
 			EnvSecretAllowedKIDs:     "dev-2",
 			EnvSecretAllowedProvider: "file",
@@ -129,6 +133,8 @@ func TestLoadDeliverySecurityRejectsInvalidEnvironment(t *testing.T) {
 		{"unset provider", EnvSecretProvider, ""},
 		{"unknown provider", EnvSecretProvider, "vault_transit"},
 		{"unset keyring", EnvSecretKeyringPath, ""},
+		{"relative keyring", EnvSecretKeyringPath, "keys/ring.json"},
+		{"malformed keyring", EnvSecretKeyringPath, filepath.Join(t.TempDir(), "ring.json") + "\x00"},
 		{"unset current", EnvSecretCurrentKID, ""},
 		{"unset allowed kids", EnvSecretAllowedKIDs, ""},
 		{"unset allowed providers", EnvSecretAllowedProvider, ""},

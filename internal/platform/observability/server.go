@@ -23,6 +23,10 @@ func StartServer(ctx context.Context, address string, metrics *Metrics, logger *
 	if err != nil {
 		return nil, fmt.Errorf("listen metrics: %w", err)
 	}
+	if tcpAddr, ok := listener.Addr().(*net.TCPAddr); !ok || tcpAddr.IP.IsUnspecified() {
+		_ = listener.Close()
+		return nil, errors.New("metrics listener must not bind an unspecified address")
+	}
 	server := &http.Server{
 		Handler: metrics.Handler(), ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second,
@@ -42,6 +46,14 @@ func StartServer(ctx context.Context, address string, metrics *Metrics, logger *
 	}()
 	logger.Info("metrics server listening", "addr", listener.Addr().String())
 	return result, nil
+}
+
+// Addr returns the bound listener address for diagnostics and tests.
+func (s *Server) Addr() string {
+	if s == nil || s.ln == nil {
+		return ""
+	}
+	return s.ln.Addr().String()
 }
 
 // Close gracefully stops the metrics listener.

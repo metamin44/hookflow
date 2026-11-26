@@ -29,9 +29,9 @@ type Record struct {
 	DeletedAt       *time.Time
 }
 
-// Representation is the approved public endpoint document. It deliberately
-// excludes organization_id, secrets, timestamps, metrics, timeout_ms and
-// max_attempts (OD-3).
+// Representation is the complete endpoint document used by Contract A ETags.
+// It deliberately excludes organization_id, secrets, timestamps, metrics,
+// timeout_ms and max_attempts (OD-3). API handlers must use RedactedRepresent.
 type Representation struct {
 	ID            string            `json:"id"`
 	Name          string            `json:"name"`
@@ -57,4 +57,12 @@ func (r Record) Represent() Representation {
 		SigningScheme: r.SigningScheme,
 		HTTPHeaders:   headers,
 	}
+}
+
+// RedactedRepresent builds the API-facing document without mutating the stored
+// record. ETags must be calculated from Represent, not from this redacted view.
+func (r Record) RedactedRepresent() Representation {
+	representation := r.Represent()
+	representation.HTTPHeaders = SafeHeaders(r.HTTPHeaders)
+	return representation
 }

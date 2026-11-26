@@ -152,6 +152,63 @@ func TestWorkerConsumerHTTPDispositionIntegration(t *testing.T) {
 	}
 }
 
+func TestWorkerInvalidHTTPStatusTerminalCompletionIntegration(t *testing.T) {
+	f := newFixture(t)
+	transport := newRecordingTransport(nil)
+	transport.status = 600
+	client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
+
+	d := f.seedDelivery(t, deliverySeed{})
+	outboxID := f.seedOutbox(t, d.id, 1, "published", time.Time{}, time.Time{})
+	f.publishPointer(t, d.id, outboxID, 1)
+	cfg := testWorkerConfig(1)
+	runtime, _, _ := f.newWorker(t, cfg, client)
+	run := startConsumer(t, f.newConsumer(t, cfg, runtime))
+
+	eventually(t, 6*time.Second, "invalid status to terminalize and ACK", func() error {
+		row := f.readDelivery(t, d.id)
+		if row.state != "failed" || row.attemptCount != 1 || !row.completedAt.Valid ||
+			row.nextAttemptAt.Valid || row.lastResponseStatus.Valid || row.leaseToken != "" {
+			return &stateError{got: row.state, attempts: row.attemptCount, want: "failed with one nil-status attempt"}
+		}
+		info := f.queueInfo(t, messaging.DispatchQueue)
+		if info.MessagesReady != 0 || info.MessagesUnacknowledged != 0 {
+			return &queueStateError{info: info}
+		}
+		return nil
+	})
+	run.stop(t)
+
+	if got := transport.count(); got != 1 {
+		t.Fatalf("HTTP requests = %d, want exactly 1", got)
+	}
+	if got := f.attemptCount(t, d.id); got != 1 {
+		t.Fatalf("delivery_attempts rows = %d, want 1", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+	defer cancel()
+	var statusNil bool
+	var outcome, errorClass, errorMessage string
+	if err := f.pool.QueryRow(ctx, `SELECT response_status IS NULL, outcome, error_class, error_message
+		FROM delivery_attempts WHERE delivery_id = $1::uuid`, d.id).Scan(&statusNil, &outcome, &errorClass, &errorMessage); err != nil {
+		t.Fatalf("read invalid-status attempt: %v", err)
+	}
+	if !statusNil || outcome != "terminal_failure" || errorClass != "http_status" ||
+		errorMessage != "HTTP endpoint returned an invalid response status" {
+		t.Fatalf("invalid-status attempt = nil=%v outcome=%q class=%q message=%q", statusNil, outcome, errorClass, errorMessage)
+	}
+	row := f.readDelivery(t, d.id)
+	if !row.lastAttemptAt.Valid || !row.lastError.Valid || !strings.Contains(row.lastError.String, "invalid response status") {
+		t.Fatalf("delivery diagnostic = %+v", row)
+	}
+	if outboxes := f.readOutboxes(t, d.id); len(outboxes) != 1 || outboxes[0].status != "published" {
+		t.Fatalf("invalid status created a retry outbox row: %+v", outboxes)
+	}
+	if got := f.metricValue(t, "hookflow_worker_uncertain_total"); got != 0 {
+		t.Fatalf("invalid status was classified as uncertain: %d", got)
+	}
+}
+
 type stateError struct {
 	got      string
 	attempts int

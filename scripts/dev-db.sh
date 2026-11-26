@@ -20,7 +20,7 @@ Usage: scripts/dev-db.sh <command>
 
 Commands:
   up       Start PostgreSQL and wait until it is healthy
-  down     Stop and remove the service without deleting the named volume
+  down     Stop and remove only PostgreSQL; preserve its volume and leave RabbitMQ running
   status   Show Compose status and PostgreSQL health
   logs     Show PostgreSQL logs
   psql     Open an interactive psql session inside the PostgreSQL container
@@ -109,8 +109,8 @@ cmd_up() {
 
 cmd_down() {
   load_env
-  compose down
-  printf 'PostgreSQL service removed; named volume %s was preserved.\n' "$VOLUME_NAME"
+  compose rm --stop --force postgres
+  printf 'PostgreSQL container removed; named volume %s was preserved; RabbitMQ was left running.\n' "$VOLUME_NAME"
 }
 
 cmd_status() {
@@ -165,7 +165,7 @@ cmd_reset() {
   [ "$answer" = "$RESET_CONFIRMATION" ] || die "confirmation did not match; no data was deleted"
 
   verify_volume_ownership
-  compose down
+  compose rm --stop --force postgres
   if docker volume inspect "$VOLUME_NAME" >/dev/null 2>&1; then
     docker volume rm "$VOLUME_NAME" >/dev/null
     printf 'Removed volume %s.\n' "$VOLUME_NAME"
@@ -173,7 +173,7 @@ cmd_reset() {
 
   compose up -d postgres
   wait_healthy
-  printf 'PostgreSQL was recreated with an empty database. Run scripts/migrate.sh up.\n'
+  printf 'PostgreSQL was recreated with an empty database; RabbitMQ was left running. Run scripts/migrate.sh up.\n'
 }
 
 main() {

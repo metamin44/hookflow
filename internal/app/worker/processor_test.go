@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -129,7 +131,7 @@ func testSignedSecurity() config.DeliverySecurity {
 	return config.DeliverySecurity{
 		Mode:             config.ModeDevelopment,
 		Provider:         kek.ProviderLocalFile,
-		KeyringPath:      "/outside/repository/keyring.json",
+		KeyringPath:      filepath.Join(os.TempDir(), "hookflow-unit-keyring.json"),
 		CurrentKID:       "kek-1",
 		AllowedKIDs:      []string{"kek-1"},
 		AllowedProviders: []string{kek.ProviderLocalFile},
@@ -222,7 +224,7 @@ func newTestRuntimeWith(t *testing.T, cfg config.DeliveryWorker, security config
 	return runtime
 }
 
-func newTestRuntimeAndMetrics(t *testing.T, cfg config.DeliveryWorker, security config.DeliverySecurity, provider kek.Provider, store *fakeStore, executor *fakeExecutor) (*Runtime, *observability.Metrics) {
+func newTestRuntimeAndMetrics(t *testing.T, cfg config.DeliveryWorker, security config.DeliverySecurity, provider kek.Provider, store Store, executor *fakeExecutor) (*Runtime, *observability.Metrics) {
 	t.Helper()
 	metrics := observability.New()
 	runtime, err := NewRuntime(cfg, security, provider, store, executor, &fakeRetry{}, delivery.RandomToken, slog.New(slog.NewTextHandler(io.Discard, nil)), metrics)

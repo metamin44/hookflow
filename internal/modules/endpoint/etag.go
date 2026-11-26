@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"hash"
+	"sort"
 	"strings"
 )
 
@@ -62,10 +63,20 @@ func writeOptional(w hash.Hash, value *string) {
 
 func writeHeaders(w hash.Hash, headers map[string]string) {
 	normalized := make(map[string]string, len(headers))
-	for name, value := range headers {
-		normalized[strings.ToLower(name)] = value
+	names := make([]string, 0, len(headers))
+	for name := range headers {
+		names = append(names, name)
 	}
-	names := SortedHeaderNames(normalized)
+	sort.Strings(names)
+	for _, name := range names {
+		canonical := strings.ToLower(name)
+		if _, exists := normalized[canonical]; !exists {
+			// Historical rows can contain case-insensitive duplicates. Keep the
+			// first raw-name sort winner so Go map iteration cannot move the tag.
+			normalized[canonical] = headers[name]
+		}
+	}
+	names = SortedHeaderNames(normalized)
 	var count [4]byte
 	//nolint:gosec // Header count is capped at 32.
 	binary.BigEndian.PutUint32(count[:], uint32(len(names)))

@@ -16,12 +16,20 @@ import (
 // reused there.
 var ErrStaleHandle = errors.New("delivery handle belongs to a closed channel generation")
 
+type generationChannel interface {
+	Ack(uint64, bool) error
+	Reject(uint64, bool) error
+	IsClosed() bool
+	Consume(string, string, bool, bool, bool, bool, amqp.Table) (<-chan amqp.Delivery, error)
+}
+
 type channelGeneration struct {
-	mu          sync.Mutex
-	channel     *amqp.Channel
-	conn        *amqp.Connection
-	closeBudget time.Duration
-	closed      bool
+	mu           sync.Mutex
+	channel      generationChannel
+	conn         *amqp.Connection
+	closeBudget  time.Duration
+	closeChannel func() error
+	closed       bool
 }
 
 // Handle is a type-safe broker delivery owned by exactly one channel generation.
@@ -47,12 +55,11 @@ func (h *Handle) Ack() error {
 	if h == nil || h.generation == nil {
 		return ErrStaleHandle
 	}
-	h.generation.mu.Lock()
-	defer h.generation.mu.Unlock()
-	if h.generation.closed || h.generation.channel == nil || h.generation.channel.IsClosed() {
+	channel := h.generation.settlementChannel()
+	if channel == nil {
 		return ErrStaleHandle
 	}
-	return h.generation.channel.Ack(h.tag, false)
+	return channel.Ack(h.tag, false)
 }
 
 // RejectRequeue is the sole RB-4 negative settlement. There is deliberately no
@@ -61,12 +68,25 @@ func (h *Handle) RejectRequeue() error {
 	if h == nil || h.generation == nil {
 		return ErrStaleHandle
 	}
-	h.generation.mu.Lock()
-	defer h.generation.mu.Unlock()
-	if h.generation.closed || h.generation.channel == nil || h.generation.channel.IsClosed() {
+	channel := h.generation.settlementChannel()
+	if channel == nil {
 		return ErrStaleHandle
 	}
-	return h.generation.channel.Reject(h.tag, true)
+	return channel.Reject(h.tag, true)
+}
+
+func (g *channelGeneration) settlementChannel() generationChannel {
+	g.mu.Lock()
+	if g.closed || g.channel == nil {
+		g.mu.Unlock()
+		return nil
+	}
+	channel := g.channel
+	g.mu.Unlock()
+	if channel.IsClosed() {
+		return nil
+	}
+	return channel
 }
 
 func (g *channelGeneration) close() {
@@ -78,10 +98,14 @@ func (g *channelGeneration) close() {
 	stopWatch := messaging.WatchConnectionContext(ctx, g.conn)
 	defer stopWatch()
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if g.closed {
+		g.mu.Unlock()
 		return
 	}
 	g.closed = true
-	_ = messaging.CloseChannelAndConnection(g.conn, g.channel, g.closeBudget)
+	closeChannel := g.closeChannel
+	g.mu.Unlock()
+	if closeChannel != nil {
+		_ = closeChannel()
+	}
 }

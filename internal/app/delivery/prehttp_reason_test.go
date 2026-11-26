@@ -16,6 +16,7 @@ func TestPreHTTPReasonClassification(t *testing.T) {
 		{reason: ReasonProviderDisallowed, valid: true},
 		{reason: ReasonSigningInternal, valid: true},
 		{reason: ReasonDestinationDisallowed, valid: true},
+		{reason: ReasonHeadersInvalid, valid: true},
 		{reason: PreHTTPReason("unknown"), valid: false},
 		{reason: PreHTTPReason(""), valid: false},
 	}

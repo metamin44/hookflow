@@ -952,13 +952,20 @@ static text per code above.
   ignores proxy environment variables, does not follow redirects and revalidates on every retry (connection
   reuse is disabled). A disallowed destination is a permanent pre-HTTP failure (`destination_disallowed`):
   state `failed`, no attempt row, no `attempt_count` increment, no retry outbox row, cleared lease and a
-  distinct metric. Private destinations that already exist fail closed; there is no backfill, pause or
-  snapshot rewrite. URL syntax validation alone is not treated as an SSRF control, and network-level egress
-  restriction remains the recommended defense in depth.
+  distinct metric. The prohibited IPv6 table includes deprecated site-local `fec0::/10`. Private destinations
+  that already exist fail closed; there is no backfill, pause or snapshot rewrite. URL syntax validation alone
+  is not treated as an SSRF control, and network-level egress restriction remains the recommended defense in
+  depth. Malformed persisted request-header snapshots are likewise permanent pre-HTTP failures
+  (`headers_invalid`): no HTTP, no attempt row or count increment, no retry outbox row, cleared lease and a
+  distinct metric.
 * **Least-privilege database roles**: the application role gets `INSERT`/`SELECT` on `audit_logs` and
   no `UPDATE`/`DELETE`; retention uses a separate role.
 * **Data handling**: response bodies and errors are truncated before persistence; credential-bearing
-  request headers are redacted before an attempt row is written. **U42** fixes the same rule on the way
+  request headers are redacted before an attempt row is written. Endpoint writes use an explicit six-name
+  custom-header allowlist plus a segment-aware credential classifier. Historical endpoint API responses omit
+  sensitive/unsupported values while Contract A ETags cover full stored state; new Delivery snapshots copy
+  only safe allowlisted headers, and existing snapshots are filtered for recognized credential headers at
+  transmission time without database rewriting. **U42** fixes the same rule on the way
   out: an RFC 9457 body carries a stable `code` and a static `detail`, never a payload, a digest, another
   request's `event_id`, or secret material. **U45** closes the one remaining leakage route by rejecting the
   per-conflict `audit_logs` write — a 409 stores nothing anywhere, so a probing caller cannot leave a
@@ -3502,3 +3509,23 @@ approved transaction code was performed.
 
 **R-1 and R-2 remain as recorded.** The composite Publisher/Worker lifecycle test and the
 counter-budget-across-restarts invariant in `docs/operations/configuration.md` are unchanged by this round.
+
+### 16.12 Owner-approved header, shutdown and API-metrics remediation (2026-11-26)
+
+This is a current implementation record, not a rewrite of the dated evidence above and not a Production Readiness
+claim. Endpoint writes use the explicit six-name custom-header allowlist documented in the configuration reference,
+backed by one segment-aware credential classifier at validation, persistence, redaction, snapshot and execution
+boundaries. Historical Endpoint responses omit unsafe values while Contract A ETags still hash full stored state;
+new Delivery snapshots copy only safe headers, and existing immutable snapshots are filtered at transmission without
+database rewriting. Historical case-insensitive duplicate names have a deterministic ETag tie-break.
+
+Worker settlement admission and force-stop share the per-work `active`/`settlement_started`/`forced`/`finished`
+state lock. Admitted work remains tracked through actual return. Broker settlement I/O does not hold the generation
+state lock, so bounded channel/connection cleanup remains possible. Lifecycle cleanup closes PostgreSQL only after
+the consumer and all database-using components have returned and the consumer is quiescent; an incomplete or timed-out
+drain reports failure and leaves the pool open.
+
+The API optionally starts the shared process-local metrics server through `HOOKFLOW_METRICS_ADDR`; no `/metrics`
+route is added to the public API mux. Configuration rejects wildcard/unspecified literals (including scoped and mapped
+IPv6 forms), and the shared server verifies the actual bound TCP address before serving. Non-loopback exposure still
+requires an approved scrape topology and network ACL/firewall restrictions. No schema, migration or dependency changed.

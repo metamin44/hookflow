@@ -60,6 +60,34 @@ func Validate(document []byte) (Stats, error) {
 	return stats, nil
 }
 
+// ValidateStructure validates exactly one I-JSON value, including syntax,
+// duplicate-name rejection, UTF-8 and nesting limits, without applying HookFlow's
+// numeric range policy. Event ingestion uses this before envelope validation so
+// an invalid envelope wins over a simultaneously invalid number.
+func ValidateStructure(document []byte) error {
+	dec := jsontext.NewDecoder(bytes.NewReader(document))
+	if err := walkStructure(dec); err != nil {
+		return normalizeSyntaxError(err)
+	}
+	return requireEOF(dec)
+}
+
+// ValidateNumbers applies the approved numeric policy to every number token and
+// reports observability-only inexactness. Callers that need envelope errors to
+// precede numeric errors must first call ValidateStructure and validate the
+// envelope, then call this function.
+func ValidateNumbers(document []byte) (Stats, error) {
+	dec := jsontext.NewDecoder(bytes.NewReader(document))
+	var stats Stats
+	if err := walkValue(dec, &stats); err != nil {
+		return Stats{}, normalizeSyntaxError(err)
+	}
+	if err := requireEOF(dec); err != nil {
+		return Stats{}, err
+	}
+	return stats, nil
+}
+
 // Canonicalize returns the RFC 8785 canonical UTF-8 representation of
 // document. It rejects duplicate member names and multiple top-level values.
 //
@@ -96,6 +124,41 @@ func requireEOF(dec *jsontext.Decoder) error {
 		return normalizeSyntaxError(err)
 	}
 	return fmt.Errorf("%w: second top-level value", ErrMultipleValues)
+}
+
+func walkStructure(dec *jsontext.Decoder) error {
+	kind := dec.PeekKind()
+	switch kind {
+	case jsontext.KindBeginObject:
+		if _, err := dec.ReadToken(); err != nil {
+			return err
+		}
+		for dec.PeekKind() != jsontext.KindEndObject {
+			if _, err := dec.ReadToken(); err != nil {
+				return err
+			}
+			if err := walkStructure(dec); err != nil {
+				return err
+			}
+		}
+		_, err := dec.ReadToken()
+		return err
+	case jsontext.KindBeginArray:
+		if _, err := dec.ReadToken(); err != nil {
+			return err
+		}
+		for dec.PeekKind() != jsontext.KindEndArray {
+			if err := walkStructure(dec); err != nil {
+				return err
+			}
+		}
+		_, err := dec.ReadToken()
+		return err
+	case jsontext.KindNumber, jsontext.KindString, jsontext.KindNull, jsontext.KindTrue, jsontext.KindFalse:
+		return dec.SkipValue()
+	default:
+		return fmt.Errorf("%w: unexpected token %s", ErrInvalidJSON, kind)
+	}
 }
 
 func walkValue(dec *jsontext.Decoder, stats *Stats) error {

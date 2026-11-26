@@ -31,7 +31,7 @@ func TestLoadEndpointLimitsExplicit(t *testing.T) {
 }
 
 func TestLoadEndpointLimitsRejectsInvalid(t *testing.T) {
-	for _, value := range []string{"", "0", "-1", "abc", "1.5"} {
+	for _, value := range []string{"", "   ", "0", "-1", "abc", "1.5"} {
 		value := value
 		t.Run(value, func(t *testing.T) {
 			_, err := loadEndpointLimits(func(key string) (string, bool) {

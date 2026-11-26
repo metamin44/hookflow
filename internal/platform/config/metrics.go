@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -26,6 +27,16 @@ func loadMetricsAddr(getenv func(string) (string, bool)) (string, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return "", fmt.Errorf("%s must be a host:port address", EnvMetricsAddr)
+	}
+	if host == "" {
+		return "", fmt.Errorf("%s must use an explicit host; wildcard binding is not allowed", EnvMetricsAddr)
+	}
+	ipHost := host
+	if zone := strings.LastIndexByte(host, '%'); zone >= 0 {
+		ipHost = host[:zone]
+	}
+	if ip, err := netip.ParseAddr(ipHost); err == nil && ip.Unmap().IsUnspecified() {
+		return "", fmt.Errorf("%s must use an explicit non-wildcard host", EnvMetricsAddr)
 	}
 	if strings.ContainsAny(host, " \t\r\n/") {
 		return "", fmt.Errorf("%s host must not contain whitespace or slashes", EnvMetricsAddr)

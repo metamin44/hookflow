@@ -64,6 +64,17 @@ func TestStrongTagHeaderCanonicalization(t *testing.T) {
 	}
 }
 
+func TestStrongTagHistoricalCaseDuplicatesAreDeterministic(t *testing.T) {
+	rep := sampleRepresentation()
+	rep.HTTPHeaders = map[string]string{"X-Tenant": "upper", "x-tenant": "lower"}
+	want := StrongTag(rep, "env")
+	for i := 0; i < 100; i++ {
+		if got := StrongTag(rep, "env"); got != want {
+			t.Fatalf("StrongTag() for historical duplicates changed: %q != %q", got, want)
+		}
+	}
+}
+
 func TestStrongTagDescriptionPresenceIsDistinct(t *testing.T) {
 	absent := sampleRepresentation()
 	absent.Description = nil
@@ -105,6 +116,34 @@ func TestStrongTagExcludesOD3Fields(t *testing.T) {
 	second := StrongTag(rep, "env")
 	if first == second {
 		t.Fatal("StrongTag() ignored a public field change")
+	}
+}
+
+func TestRedactedRepresentPreservesFullStateETag(t *testing.T) {
+	left := Record{
+		ID: "0198c0de-0000-7000-8000-000000000001", Name: "billing", URL: "https://example.test/hook",
+		Status: StatusActive, SigningScheme: SigningScheme, SecretEncrypted: "env-a",
+		HTTPHeaders: map[string]string{"x-tenant": "acme", "authorization": "legacy-a"},
+	}
+	right := left
+	right.HTTPHeaders = map[string]string{"x-tenant": "acme", "authorization": "legacy-b"}
+
+	leftPublic := left.RedactedRepresent()
+	rightPublic := right.RedactedRepresent()
+	if leftPublic.HTTPHeaders["x-tenant"] != "acme" || len(leftPublic.HTTPHeaders) != 1 {
+		t.Fatalf("redacted headers = %v", leftPublic.HTTPHeaders)
+	}
+	if len(rightPublic.HTTPHeaders) != 1 || rightPublic.HTTPHeaders["x-tenant"] != "acme" {
+		t.Fatalf("redacted headers = %v", rightPublic.HTTPHeaders)
+	}
+	if StrongTag(leftPublic, left.SecretEncrypted) != StrongTag(rightPublic, right.SecretEncrypted) {
+		t.Fatal("redacted representations did not converge")
+	}
+	if StrongTag(left.Represent(), left.SecretEncrypted) == StrongTag(right.Represent(), right.SecretEncrypted) {
+		t.Fatal("full-state ETags ignored distinct historical credential values")
+	}
+	if left.Represent().HTTPHeaders["authorization"] != "legacy-a" || left.HTTPHeaders["authorization"] != "legacy-a" {
+		t.Fatal("redaction mutated the full representation or stored record")
 	}
 }
 

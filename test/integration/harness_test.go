@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -696,7 +698,7 @@ func testSecurityConfig() config.DeliverySecurity {
 		Mode:                  config.ModeDevelopment,
 		AllowUnsignedDelivery: true,
 		Provider:              kek.ProviderLocalFile,
-		KeyringPath:           "outside-repository/integration-keyring.json",
+		KeyringPath:           filepath.Join(os.TempDir(), "hookflow-integration-keyring.json"),
 		CurrentKID:            "kek-1",
 		AllowedKIDs:           []string{"kek-1"},
 		AllowedProviders:      []string{kek.ProviderLocalFile},
@@ -825,7 +827,7 @@ func (f *fixture) newWorkerWith(t *testing.T, cfg config.DeliveryWorker, client 
 	executor, err := worker.NewExecutor(worker.HTTPOptions{
 		Deadline: cfg.HTTPDeadline, HandshakeBudget: cfg.HandshakeBudget,
 		PostProcessBudget: cfg.PostProcessBudget, ShutdownReserve: cfg.ShutdownReserve,
-		ResponseBodyLimit: cfg.ResponseBodyLimit, Client: client,
+		ResponseBodyLimit: cfg.ResponseBodyLimit, Client: client, Metrics: f.metrics,
 	}, signer, f.logger)
 	if err != nil {
 		t.Fatalf("create HTTP executor: %v", err)

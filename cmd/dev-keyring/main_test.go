@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -53,6 +54,53 @@ func TestEnsureCreatesAUsableKeyringOutsideAnyRepositoryPath(t *testing.T) {
 	encoded := encodedKeyForKid(t, path, "kek-1")
 	if strings.Contains(output, encoded) {
 		t.Fatal("tool output contains key material")
+	}
+}
+
+func TestEnsureWithRootEnforcesRepositoryPlacement(t *testing.T) {
+	repository := t.TempDir()
+	inside := filepath.Join(repository, "keys", "keyring.json")
+	if err := ensureWithRoot(io.Discard, testOptions(t, inside, "kek-1"), repository); err == nil {
+		t.Fatal("repository-contained keyring path was accepted")
+	}
+	if _, err := os.Stat(inside); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected keyring path was created: %v", err)
+	}
+	if err := ensureWithRoot(io.Discard, testOptions(t, "relative/keyring.json", "kek-1"), repository); err == nil {
+		t.Fatal("relative keyring path was accepted")
+	}
+
+	external := filepath.Join(t.TempDir(), "external", "keyring.json")
+	if err := ensureWithRoot(io.Discard, testOptions(t, external, "kek-1"), repository); err != nil {
+		t.Fatalf("external keyring path was rejected: %v", err)
+	}
+	if _, err := os.Stat(external); err != nil {
+		t.Fatalf("external keyring was not created: %v", err)
+	}
+}
+
+func TestEnsureWithRootResolvesSymlinks(t *testing.T) {
+	repository := t.TempDir()
+	external := t.TempDir()
+	insideLink := filepath.Join(repository, "external-link")
+	if err := os.Symlink(external, insideLink); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	allowed := filepath.Join(insideLink, "keyring.json")
+	if err := ensureWithRoot(io.Discard, testOptions(t, allowed, "kek-1"), repository); err != nil {
+		t.Fatalf("repository symlink to external storage was rejected: %v", err)
+	}
+
+	outsideLink := filepath.Join(t.TempDir(), "repository-link")
+	if err := os.Symlink(repository, outsideLink); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	rejected := filepath.Join(outsideLink, "nested", "keyring.json")
+	if err := ensureWithRoot(io.Discard, testOptions(t, rejected, "kek-1"), repository); err == nil {
+		t.Fatal("external symlink resolving into the repository was accepted")
+	}
+	if _, err := os.Stat(rejected); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("symlink-resolved repository path was created: %v", err)
 	}
 }
 

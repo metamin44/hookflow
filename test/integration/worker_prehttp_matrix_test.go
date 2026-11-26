@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/metamin44/hookflow/internal/app/worker"
 	"github.com/metamin44/hookflow/internal/platform/config"
+	"github.com/metamin44/hookflow/internal/platform/destination"
 	"github.com/metamin44/hookflow/internal/platform/id"
 	"github.com/metamin44/hookflow/internal/platform/kek"
 	"github.com/metamin44/hookflow/internal/platform/messaging"
@@ -29,6 +32,7 @@ import (
 // base transport it answers 204 so disposition paths stay deterministic.
 type recordingTransport struct {
 	base     http.RoundTripper
+	status   int
 	requests atomic.Int64
 
 	mu      sync.Mutex
@@ -62,8 +66,12 @@ func (t *recordingTransport) RoundTrip(request *http.Request) (*http.Response, e
 	if t.base != nil {
 		return t.base.RoundTrip(request)
 	}
+	status := t.status
+	if status == 0 {
+		status = http.StatusNoContent
+	}
 	return &http.Response{
-		StatusCode: http.StatusNoContent,
+		StatusCode: status,
 		Header:     http.Header{},
 		Body:       http.NoBody,
 		Request:    request,
@@ -107,6 +115,16 @@ func (s *failingSigner) Sign(string, []byte, []byte) (signing.Headers, error) {
 	return signing.Headers{}, errors.New("signing service unavailable")
 }
 
+type staticIntegrationResolver struct {
+	addrs []netip.Addr
+	calls atomic.Int64
+}
+
+func (r *staticIntegrationResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	r.calls.Add(1)
+	return append([]netip.Addr(nil), r.addrs...), nil
+}
+
 type preHTTPCase struct {
 	name          string
 	storedHeaders string
@@ -115,24 +133,26 @@ type preHTTPCase struct {
 	security      func() config.DeliverySecurity
 	provider      func(*fixture, seededDelivery) kek.Provider
 	signer        func() worker.RequestSigner
+	resolver      func() destination.Resolver
 	config        func(config.DeliveryWorker) config.DeliveryWorker
 	publishSeq    int
 
-	wantHTTP             int
-	wantState            string
-	wantAttemptRows      int
-	wantAttemptCount     int
-	wantCompleted        bool
-	wantNextAttempt      bool
-	wantLeaseCleared     bool
-	wantDispatchSeq      int
-	wantOutboxRows       int
-	wantAck              int64
-	wantReject           bool
-	wantReasonMetric     string
-	wantReasonValue      int64
-	wantLastErrorMessage string
-	wantWireHeadersEmpty bool
+	wantHTTP                   int
+	wantState                  string
+	wantAttemptRows            int
+	wantAttemptCount           int
+	wantCompleted              bool
+	wantNextAttempt            bool
+	wantLeaseCleared           bool
+	wantDispatchSeq            int
+	wantOutboxRows             int
+	wantAck                    int64
+	wantReject                 bool
+	wantReasonMetric           string
+	wantReasonValue            int64
+	wantLastErrorMessage       string
+	wantWireHeadersEmpty       bool
+	wantStoredHeadersUnchanged bool
 }
 
 func disabledUnsignedSecurity() config.DeliverySecurity {
@@ -194,6 +214,15 @@ func TestWorkerPreHTTPDispositionMatrixIntegration(t *testing.T) {
 			wantWireHeadersEmpty: true,
 		},
 		{
+			name:          "legacy credential headers are filtered without changing the snapshot",
+			storedHeaders: `{"Authorization":"legacy-authorization","X-Auth":"legacy-auth","X.Api.Key":"legacy-api","X-Custom":"snapshot"}`,
+			wantHTTP:      1, wantState: "succeeded", wantAttemptRows: 1, wantAttemptCount: 1,
+			wantCompleted: true, wantNextAttempt: false, wantLeaseCleared: true,
+			wantDispatchSeq: 1, wantOutboxRows: 1, wantAck: 1,
+			wantReasonMetric: "hookflow_worker_legacy_credential_headers_filtered_total", wantReasonValue: 3,
+			wantWireHeadersEmpty: true, wantStoredHeadersUnchanged: true,
+		},
+		{
 			name:     "malformed stored envelope terminalizes",
 			secret:   func(*testing.T, *fixture) string { return "hfse1.not-a-valid-envelope" },
 			wantHTTP: 0, wantState: "failed", wantAttemptRows: 0, wantAttemptCount: 0,
@@ -201,6 +230,15 @@ func TestWorkerPreHTTPDispositionMatrixIntegration(t *testing.T) {
 			wantDispatchSeq: 1, wantOutboxRows: 1, wantAck: 1,
 			wantReasonMetric: "hookflow_worker_secret_invalid_total", wantReasonValue: 1,
 			wantLastErrorMessage: "envelope is invalid",
+		},
+		{
+			name:          "malformed stored headers are a permanent pre-HTTP failure",
+			storedHeaders: `{"X-Test":1}`,
+			wantHTTP:      0, wantState: "failed", wantAttemptRows: 0, wantAttemptCount: 0,
+			wantCompleted: true, wantNextAttempt: false, wantLeaseCleared: true,
+			wantDispatchSeq: 1, wantOutboxRows: 1, wantAck: 1,
+			wantReasonMetric: "hookflow_worker_headers_invalid_total", wantReasonValue: 1,
+			wantLastErrorMessage: "headers are invalid",
 		},
 		{
 			name: "unknown kid terminalizes",
@@ -324,6 +362,40 @@ func TestWorkerPreHTTPDispositionMatrixIntegration(t *testing.T) {
 			wantLastErrorMessage: "not permitted by policy",
 		},
 		{
+			name: "mixed public and site-local DNS answers terminalize before HTTP",
+			seed: func(seed *deliverySeed) {
+				seed.url = "https://mixed.example.test/hook"
+			},
+			resolver: func() destination.Resolver {
+				return &staticIntegrationResolver{addrs: []netip.Addr{
+					netip.MustParseAddr("2606:4700:4700::1111"),
+					netip.MustParseAddr("fec0::1"),
+				}}
+			},
+			wantHTTP: 0, wantState: "failed", wantAttemptRows: 0, wantAttemptCount: 0,
+			wantCompleted: true, wantNextAttempt: false, wantLeaseCleared: true,
+			wantDispatchSeq: 1, wantOutboxRows: 1, wantAck: 1,
+			wantReasonMetric: "hookflow_worker_destination_disallowed_total", wantReasonValue: 1,
+			wantLastErrorMessage: "not permitted by policy",
+		},
+		{
+			name: "mixed site-local and public DNS answers terminalize before HTTP",
+			seed: func(seed *deliverySeed) {
+				seed.url = "https://mixed.example.test/hook"
+			},
+			resolver: func() destination.Resolver {
+				return &staticIntegrationResolver{addrs: []netip.Addr{
+					netip.MustParseAddr("fec0::1"),
+					netip.MustParseAddr("1.1.1.1"),
+				}}
+			},
+			wantHTTP: 0, wantState: "failed", wantAttemptRows: 0, wantAttemptCount: 0,
+			wantCompleted: true, wantNextAttempt: false, wantLeaseCleared: true,
+			wantDispatchSeq: 1, wantOutboxRows: 1, wantAck: 1,
+			wantReasonMetric: "hookflow_worker_destination_disallowed_total", wantReasonValue: 1,
+			wantLastErrorMessage: "not permitted by policy",
+		},
+		{
 			name: "stale generation is ACKed without mutation",
 			seed: func(seed *deliverySeed) {
 				seed.dispatchSeq = 2
@@ -342,7 +414,10 @@ func TestWorkerPreHTTPDispositionMatrixIntegration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
 			transport := newRecordingTransport(nil)
-			client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
+			var resolver destination.Resolver
+			if tc.resolver != nil {
+				resolver = tc.resolver()
+			}
 
 			seed := deliverySeed{url: "https://example.test/hook", headers: tc.storedHeaders}
 			if tc.seed != nil {
@@ -367,6 +442,21 @@ func TestWorkerPreHTTPDispositionMatrixIntegration(t *testing.T) {
 			if tc.config != nil {
 				cfg = tc.config(cfg)
 			}
+			var roundTripper http.RoundTripper = transport
+			var dialCalls atomic.Int64
+			if resolver != nil {
+				base := destination.Transport(resolver, cfg.HandshakeBudget)
+				dial := base.DialContext
+				base.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+					conn, err := dial(ctx, network, address)
+					if err == nil {
+						dialCalls.Add(1)
+					}
+					return conn, err
+				}
+				roundTripper = base
+			}
+			client := &http.Client{Transport: roundTripper, Timeout: 2 * time.Second}
 			security := testSecurityConfig()
 			if tc.security != nil {
 				security = tc.security()
@@ -407,9 +497,15 @@ func TestWorkerPreHTTPDispositionMatrixIntegration(t *testing.T) {
 			if got := transport.count(); got != int64(tc.wantHTTP) {
 				t.Fatalf("HTTP requests = %d, want %d", got, tc.wantHTTP)
 			}
+			if static, ok := resolver.(*staticIntegrationResolver); ok && static.calls.Load() != 1 {
+				t.Fatalf("DNS lookups = %d, want 1", static.calls.Load())
+			}
+			if resolver != nil && dialCalls.Load() != 0 {
+				t.Fatalf("successful destination connections = %d, want 0", dialCalls.Load())
+			}
 			if tc.wantWireHeadersEmpty {
 				header, body := transport.captured()
-				for _, name := range []string{signing.HeaderID, signing.HeaderTimestamp, signing.HeaderSignature, "X-HookFlow-Signature"} {
+				for _, name := range []string{signing.HeaderID, signing.HeaderTimestamp, signing.HeaderSignature, "X-HookFlow-Signature", "Authorization", "X-Auth", "X.Api.Key"} {
 					if value := header.Get(name); value != "" {
 						t.Fatalf("unsigned request transmitted %s = %q", name, value)
 					}
@@ -419,6 +515,18 @@ func TestWorkerPreHTTPDispositionMatrixIntegration(t *testing.T) {
 				}
 				if len(body) == 0 {
 					t.Fatal("unsigned request body was empty")
+				}
+			}
+
+			if tc.wantStoredHeadersUnchanged {
+				var unchanged bool
+				if err := f.pool.QueryRow(context.Background(),
+					`SELECT http_headers = $1::jsonb FROM deliveries WHERE id = $2::uuid`, tc.storedHeaders, d.id,
+				).Scan(&unchanged); err != nil {
+					t.Fatalf("compare stored delivery headers: %v", err)
+				}
+				if !unchanged {
+					t.Fatal("execution-time filtering mutated the stored delivery snapshot")
 				}
 			}
 

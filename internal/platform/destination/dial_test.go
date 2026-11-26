@@ -51,6 +51,29 @@ func TestResolveAllowedRejectsMixedAnswers(t *testing.T) {
 	}
 }
 
+func TestResolveAllowedRejectsSiteLocalAnswers(t *testing.T) {
+	t.Parallel()
+	for _, addrs := range [][]netip.Addr{
+		{netip.MustParseAddr("fec0::1")},
+		{netip.MustParseAddr("2606:4700:4700::1111"), netip.MustParseAddr("fec0::1")},
+		{netip.MustParseAddr("fec0::1"), netip.MustParseAddr("1.1.1.1")},
+	} {
+		resolver := &staticResolver{addrs: addrs}
+		if _, err := ResolveAllowed(context.Background(), resolver, "example.test"); !errors.Is(err, ErrProhibited) {
+			t.Fatalf("site-local answers %v = %v, want prohibited", addrs, err)
+		}
+	}
+}
+
+func TestResolveAllowedAcceptsPublicIPv6Answer(t *testing.T) {
+	t.Parallel()
+	resolver := &staticResolver{addrs: []netip.Addr{netip.MustParseAddr("2606:4700:4700::1111")}}
+	addr, err := ResolveAllowed(context.Background(), resolver, "example.test")
+	if err != nil || addr != netip.MustParseAddr("2606:4700:4700::1111") {
+		t.Fatalf("public IPv6 answer = %v, %v", addr, err)
+	}
+}
+
 func TestResolveAllowedRejectsMappedPrivateAnswer(t *testing.T) {
 	t.Parallel()
 	resolver := &staticResolver{addrs: []netip.Addr{
@@ -179,7 +202,7 @@ func TestDialRejectsProhibitedLiteralWithoutDialing(t *testing.T) {
 	t.Parallel()
 	recorder := &dialRecorder{}
 	d := newTestDialer(&staticResolver{}, recorder, nil)
-	for _, address := range []string{"10.0.0.1:443", "127.0.0.1:443", "[::1]:443", "[fe80::1]:443"} {
+	for _, address := range []string{"10.0.0.1:443", "127.0.0.1:443", "[::1]:443", "[fe80::1]:443", "[fec0::1]:443"} {
 		if _, err := d.dialContext(context.Background(), "tcp", address); !errors.Is(err, ErrProhibited) {
 			t.Fatalf("%s = %v, want prohibited", address, err)
 		}
@@ -199,6 +222,22 @@ func TestDialRejectsProhibitedResolutionWithoutDialing(t *testing.T) {
 	}
 	if len(recorder.addresses) != 0 {
 		t.Fatalf("prohibited answer was dialed %v", recorder.addresses)
+	}
+}
+
+func TestDialRejectsMixedSiteLocalResolutionWithoutDialing(t *testing.T) {
+	t.Parallel()
+	resolver := &staticResolver{addrs: []netip.Addr{
+		netip.MustParseAddr("2606:4700:4700::1111"),
+		netip.MustParseAddr("fec0::1"),
+	}}
+	recorder := &dialRecorder{}
+	d := newTestDialer(resolver, recorder, nil)
+	if _, err := d.dialContext(context.Background(), "tcp", "internal.example.test:443"); !errors.Is(err, ErrProhibited) {
+		t.Fatalf("mixed site-local resolution = %v, want prohibited", err)
+	}
+	if len(recorder.addresses) != 0 {
+		t.Fatalf("mixed site-local answers were dialed: %v", recorder.addresses)
 	}
 }
 

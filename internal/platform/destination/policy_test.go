@@ -31,7 +31,7 @@ func TestProhibitedIPv6Ranges(t *testing.T) {
 	for _, value := range []string{
 		"::/128", "::1/128", "::/96", "::ffff:0:0/96", "64:ff9b::/96",
 		"64:ff9b:1::/48", "100::/64", "2001::/23", "2001:db8::/32", "2002::/16",
-		"3fff::/20", "5f00::/16", "fc00::/7", "fe80::/10", "ff00::/8",
+		"3fff::/20", "5f00::/16", "fc00::/7", "fe80::/10", "fec0::/10", "ff00::/8",
 	} {
 		value := value
 		t.Run(value, func(t *testing.T) {
@@ -48,7 +48,7 @@ func TestClassifiedAddressesAreProhibited(t *testing.T) {
 	t.Parallel()
 	for _, value := range []string{
 		"169.254.10.20", "224.0.0.1", "255.255.255.255", "0.0.0.0",
-		"fe80::1", "ff02::1", "ff01::1", "fd00::1", "::1", "::",
+		"fe80::1", "fec0::1", "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "ff02::1", "ff01::1", "fd00::1", "::1", "::",
 	} {
 		value := value
 		t.Run(value, func(t *testing.T) {
@@ -132,6 +132,7 @@ func TestParseURLRestrictions(t *testing.T) {
 		"private literal": "https://10.0.0.5/hook",
 		"loopback":        "https://127.0.0.1/hook",
 		"ipv6 loopback":   "https://[::1]/hook",
+		"ipv6 site local": "https://[fec0::1]/hook",
 		"metadata":        "https://169.254.169.254/latest/meta-data",
 		"leading space":   " https://example.test/hook",
 		"trailing space":  "https://example.test/hook ",

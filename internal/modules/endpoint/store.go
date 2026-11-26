@@ -136,6 +136,26 @@ func Update(ctx context.Context, q Querier, record Record) (Record, error) {
 	return updated, nil
 }
 
+// UpdateMetadata updates non-header fields without touching historical headers.
+// This permits unrelated PATCH operations on legacy rows while keeping every
+// actual header write behind CanonicalHeaders validation.
+func UpdateMetadata(ctx context.Context, q Querier, record Record) (Record, error) {
+	const statement = `UPDATE endpoints
+		SET name = $3, description = $4, url = $5, status = $6, updated_at = now()
+		WHERE organization_id = $1::uuid AND id = $2::uuid AND deleted_at IS NULL
+		RETURNING ` + columns
+	updated, err := scanRecord(q.QueryRow(ctx, statement,
+		record.OrganizationID, record.ID, record.Name, record.Description, record.URL, record.Status,
+	))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Record{}, ErrNotFound
+	}
+	if err != nil {
+		return Record{}, fmt.Errorf("update endpoint metadata: %w", err)
+	}
+	return updated, nil
+}
+
 // UpdateSecret replaces only the encrypted envelope.
 func UpdateSecret(ctx context.Context, q Querier, organizationID, endpointID, secretEncrypted string) (Record, error) {
 	const statement = `UPDATE endpoints
@@ -176,10 +196,11 @@ func IsDuplicateName(err error) bool {
 }
 
 func encodeHeaders(headers map[string]string) ([]byte, error) {
-	if headers == nil {
-		headers = map[string]string{}
+	canonical, field := CanonicalHeaders(headers)
+	if field != nil {
+		return nil, field
 	}
-	encoded, err := json.Marshal(headers)
+	encoded, err := json.Marshal(canonical)
 	if err != nil {
 		return nil, fmt.Errorf("encode endpoint headers: %w", err)
 	}

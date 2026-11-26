@@ -2,7 +2,7 @@
 
 ## Scope and safety
 
-This runbook covers the Bundle 1 PostgreSQL/RabbitMQ dispatch runtime, the Phase 6 management API and the Phase 7 ingestion API. The API serves health endpoints, `POST /v1/events`, and authenticated `/v1` endpoint/subscription management; organization management is absent. Local execution on 2026-11-24 passed PostgreSQL 18.7/RabbitMQ 4.4.1 and 4.3.8 integration, Linux unit race detection, and real blocked-AMQP-RPC race tests; Phase 7 added destination-policy, ingestion and pre-HTTP disposition coverage (2026-11-25). Hosted runs `45826121102` (push) and `45826131425` (pull request) passed for merged SHA `1128f1042e3d951265aa7a8479b2d42c19a7975d`; PR #1 merged as `2fa7eae66e3835c455bba6e4ca325ddae21e342e`. Stage 8C adds a reusable nightly workflow and a pinned `govulncheck` job; neither has run on GitHub yet. The remediation working tree passed a fresh disposable down-13/up migration drill locally; production HA/outage drills remain pending. golangci-lint v2.15.0 reports advisory findings; lint cleanliness is not claimed.
+This runbook covers the Bundle 1 PostgreSQL/RabbitMQ dispatch runtime, the Phase 6 management API and the Phase 7 ingestion API. The API serves health endpoints, `POST /v1/events`, authenticated `/v1` endpoint/subscription management, and the Phase 8A organization subscription lifecycle; organization CRUD is absent. Local execution on 2026-11-24 passed PostgreSQL 18.7/RabbitMQ 4.4.1 and 4.3.8 integration, Linux unit race detection, and real blocked-AMQP-RPC race tests; Phase 7 added destination-policy, ingestion and pre-HTTP disposition coverage (2026-11-25). Hosted runs `45826121102` (push) and `45826131425` (pull request) passed for merged SHA `1128f1042e3d951265aa7a8479b2d42c19a7975d`; PR #1 merged as `2fa7eae66e3835c455bba6e4ca325ddae21e342e`. Stage 8C adds a reusable nightly workflow and a pinned `govulncheck` job; neither has run on GitHub yet. The remediation working tree passed a fresh disposable down-13/up migration drill locally; production HA/outage drills remain pending. golangci-lint v2.15.0 reports advisory findings; lint cleanliness is not claimed.
 
 The database is authoritative. RabbitMQ carries durable, identifiers-only pointers; the DLQ is telemetry, not a work queue or replay source. Delivery is at-least-once, so destinations must deduplicate.
 
@@ -64,9 +64,28 @@ go run ./cmd/apikey revoke -organization <org-uuid> -id <key-uuid>
 
 `create` prints the raw token once; treat it as a secret and never paste command output into tickets or logs. The database stores an Argon2id PHC verifier, an 8-character prefix and scopes; there is no recovery path, so revoke and reissue a lost key. The CLI needs the PostgreSQL variables only.
 
-Authentication behaviour: missing or malformed `Authorization` returns `401`; a valid key without the required scope returns `403 insufficient_scope`; unknown prefixes still perform a dummy verification (no prefix oracle); revoked and expired keys fail verification. Suspended organizations may list/get, patch name/description, pause, soft-delete endpoints, deactivate subscriptions, rotate secrets and revoke API keys, but are denied endpoint creation, activation, URL/header changes, subscription create/reactivate and API-key creation. Archived organizations may read under the existing policy but are denied every tenant management write, including endpoint changes/soft-delete, subscription create/reactivate/deactivate, rotation and API-key creation/revocation.
+Authentication behaviour: missing or malformed `Authorization` returns `401`; a valid key without the required scope returns `403 insufficient_scope`; unknown prefixes still perform a dummy verification (no prefix oracle); revoked and expired keys fail verification. Suspended organizations may list/get, patch name/description, pause, soft-delete endpoints, deactivate subscriptions, rotate secrets, cancel the organization subscription and revoke API keys, but are denied endpoint creation, activation, URL/header changes, subscription create/reactivate, organization-subscription create/replace and API-key creation. Archived organizations may read under the existing policy but are denied every tenant management write, including endpoint changes/soft-delete, subscription create/reactivate/deactivate, organization-subscription changes/cancellation, rotation and API-key creation/revocation.
 
-Scopes: `endpoints:read` (list/get endpoints and subscriptions), `endpoints:write` (endpoint and subscription writes; implies read; does not grant rotation), `endpoints:secrets:rotate` (rotation only), and `events:write` (`POST /v1/events`; default when no scopes are supplied). Unknown and wildcard values are ignored.
+Scopes: `endpoints:read` (list/get endpoints and subscriptions), `endpoints:write` (endpoint and subscription writes; implies read; does not grant rotation), `endpoints:secrets:rotate` (rotation only), `billing:read` (read the organization subscription and its history), `billing:write` (create, replace and cancel the organization subscription; implies billing read), and `events:write` (`POST /v1/events`; default when no scopes are supplied). Unknown and wildcard values are ignored.
+
+### Organization subscription lifecycle
+
+```text
+GET    /v1/organizations/{org}/subscription     current open period
+PUT    /v1/organizations/{org}/subscription     create or replace the current period
+DELETE /v1/organizations/{org}/subscription     cancel the current period
+GET    /v1/organizations/{org}/subscriptions    append-only history, newest first
+```
+
+`PUT` is a full replacement with `plan` (`free`, `pro`, `enterprise`), `status` (`trialing`, `active`,
+`past_due`, `incomplete`), and optional RFC 3339 `current_period_start`, `current_period_end` and `trial_ends_at`.
+`current_period_end` requires a start and must be later than it. `canceled` is not accepted in `PUT`; use `DELETE`.
+When an open period exists, `PUT` requires `If-Match` with the strong ETag from `GET`/`PUT` (`428` when absent,
+`412` with the current ETag when stale); an `If-Match` on a missing subscription is `412`. A plan change appends a
+new open row and cancels the previous row, preserving history. A same-plan change rewrites the open row. A
+completely unchanged `PUT` writes no audit row and returns the current ETag. `DELETE` returns the canceled period,
+and a repeated `DELETE` or `GET` after cancellation is `404`. There is no pricing, invoice, quota, entitlement or
+payment-provider integration.
 
 ### Ingestion API (`POST /v1/events`)
 
@@ -115,6 +134,15 @@ Reads return a strong `ETag` (`"hf1-…"`). PATCH and secret rotation require `I
 
 A PATCH whose fields equal the stored state performs no `UPDATE`, writes no audit row, ignores the ceiling and returns the current `ETag`. Concurrent writers surface as `412`, not as lost updates; re-read and retry. Unknown or reserved fields (`id`, `organization_id`, `secret`, `secret_encrypted`, `signing_scheme`, `timeout_ms`, `max_attempts`, timestamps) are rejected with `400`, as is a body above 1 MiB (`413 payload_too_large`).
 
+### Organization subscription writes and ETags
+
+The current organization subscription is a single-resource `GET`/`PUT`/`DELETE` under
+`/v1/organizations/{org}/subscription`, with append-only history at `…/subscriptions`. When an open period exists,
+`PUT` uses the same `If-Match` discipline as PATCH: absent → `428`, stale or weak → `412` with the current `ETag`,
+`*` → unconditional. An `If-Match` sent while no subscription exists → `412`. A no-op `PUT` writes no audit row and
+returns the current `ETag`. A plan change appends a new period and cancels the previous row; a same-plan change
+rewrites the open row. `DELETE` cancels without requiring `If-Match`; a second `DELETE` is `404`.
+
 ### Active-endpoint ceiling
 
 `HOOKFLOW_MAX_ACTIVE_ENDPOINTS_PER_ORG` (default `100`) is enforced inside one transaction: lock the `organizations` row `FOR NO KEY UPDATE`, count live `active` endpoints, then write. Only create and `paused -> active` can hit the cap and return `409 active_endpoint_cap`. That lock mode does not block delivery fan-out foreign-key checks (`FOR KEY SHARE`). Lowering the limit never pauses or deletes existing endpoints.
@@ -127,7 +155,7 @@ The API and Worker must use the same keyring and an allowlist that contains ever
 
 ### Audit and troubleshooting
 
-Every successful management write appends an `audit_logs` row with `actor_type='api_key'`, the key id, a target, the request host and a bounded user agent; `metadata` contains only changed field names, `event_type` or `name`. Header values and secrets are never recorded.
+Every successful management write appends an `audit_logs` row with `actor_type='api_key'`, the key id, a target, the request host and a bounded user agent; `metadata` contains only changed field names, `event_type`, `name`, or plan/status labels. Header values and secrets are never recorded.
 
 ```sql
 SELECT occurred_at, action, actor_id, target_type, target_id, metadata

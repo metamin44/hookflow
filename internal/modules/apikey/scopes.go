@@ -11,6 +11,8 @@ const (
 	ScopeEndpointsRead  = "endpoints:read"
 	ScopeEndpointsWrite = "endpoints:write"
 	ScopeSecretsRotate  = "endpoints:secrets:rotate"
+	ScopeBillingRead    = "billing:read"
+	ScopeBillingWrite   = "billing:write"
 )
 
 // Set is a parsed scope grant. Unknown scopes and wildcards are ignored; an
@@ -20,6 +22,8 @@ type Set struct {
 	endpointsRead  bool
 	endpointsWrite bool
 	secretsRotate  bool
+	billingRead    bool
+	billingWrite   bool
 }
 
 // Parse interprets stored or operator-supplied scope values.
@@ -36,13 +40,22 @@ func Parse(values []string) Set {
 				set.endpointsWrite = true
 			case ScopeSecretsRotate:
 				set.secretsRotate = true
+			case ScopeBillingRead:
+				set.billingRead = true
+			case ScopeBillingWrite:
+				set.billingWrite = true
 			}
 		}
 	}
-	if !set.eventsWrite && !set.endpointsRead && !set.endpointsWrite && !set.secretsRotate {
+	if !set.any() {
 		set.eventsWrite = true
 	}
 	return set
+}
+
+func (s Set) any() bool {
+	return s.eventsWrite || s.endpointsRead || s.endpointsWrite ||
+		s.secretsRotate || s.billingRead || s.billingWrite
 }
 
 // AllowsEventsWrite reports the events:write capability.
@@ -57,9 +70,15 @@ func (s Set) AllowsEndpointWrite() bool { return s.endpointsWrite }
 // AllowsSecretRotate reports the endpoints:secrets:rotate capability.
 func (s Set) AllowsSecretRotate() bool { return s.secretsRotate }
 
+// AllowsBillingRead reports the effective billing:read capability.
+func (s Set) AllowsBillingRead() bool { return s.billingRead || s.billingWrite }
+
+// AllowsBillingWrite reports the billing:write capability.
+func (s Set) AllowsBillingWrite() bool { return s.billingWrite }
+
 // CanonicalStrings renders the granted scopes in the approved storage form.
 func (s Set) CanonicalStrings() []string {
-	granted := make([]string, 0, 4)
+	granted := make([]string, 0, 6)
 	if s.eventsWrite {
 		granted = append(granted, ScopeEventsWrite)
 	}
@@ -71,6 +90,12 @@ func (s Set) CanonicalStrings() []string {
 	}
 	if s.secretsRotate {
 		granted = append(granted, ScopeSecretsRotate)
+	}
+	if s.billingRead || s.billingWrite {
+		granted = append(granted, ScopeBillingRead)
+	}
+	if s.billingWrite {
+		granted = append(granted, ScopeBillingWrite)
 	}
 	slices.Sort(granted)
 	return granted

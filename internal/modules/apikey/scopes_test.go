@@ -7,13 +7,15 @@ import (
 
 func TestParseScopes(t *testing.T) {
 	cases := []struct {
-		name   string
-		input  []string
-		read   bool
-		write  bool
-		rotate bool
-		events bool
-		canon  []string
+		name         string
+		input        []string
+		read         bool
+		write        bool
+		rotate       bool
+		events       bool
+		billingRead  bool
+		billingWrite bool
+		canon        []string
 	}{
 		{
 			name:   "empty means events write only",
@@ -72,6 +74,19 @@ func TestParseScopes(t *testing.T) {
 			events: true,
 			canon:  []string{ScopeEventsWrite},
 		},
+		{
+			name:         "billing write implies billing read",
+			input:        []string{ScopeBillingWrite},
+			billingRead:  true,
+			billingWrite: true,
+			canon:        []string{ScopeBillingRead, ScopeBillingWrite},
+		},
+		{
+			name:        "billing read only",
+			input:       []string{ScopeBillingRead},
+			billingRead: true,
+			canon:       []string{ScopeBillingRead},
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -87,6 +102,12 @@ func TestParseScopes(t *testing.T) {
 			}
 			if set.AllowsSecretRotate() != testCase.rotate {
 				t.Fatalf("AllowsSecretRotate() = %v, want %v", set.AllowsSecretRotate(), testCase.rotate)
+			}
+			if set.AllowsBillingRead() != testCase.billingRead {
+				t.Fatalf("AllowsBillingRead() = %v, want %v", set.AllowsBillingRead(), testCase.billingRead)
+			}
+			if set.AllowsBillingWrite() != testCase.billingWrite {
+				t.Fatalf("AllowsBillingWrite() = %v, want %v", set.AllowsBillingWrite(), testCase.billingWrite)
 			}
 			if got := set.CanonicalStrings(); !reflect.DeepEqual(got, testCase.canon) {
 				t.Fatalf("CanonicalStrings() = %v, want %v", got, testCase.canon)

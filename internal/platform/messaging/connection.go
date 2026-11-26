@@ -78,16 +78,29 @@ func Dial(ctx context.Context, cfg config.RabbitMQ) (*amqp.Connection, error) {
 		close(handshakeDone)
 	}
 	if err != nil {
-		if contextErr := ctx.Err(); contextErr != nil {
+		if contextErr := dialContextError(ctx); contextErr != nil {
 			return nil, fmt.Errorf("dial rabbitmq: %w", contextErr)
 		}
 		return nil, errors.New("dial rabbitmq: connection or handshake failed")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := dialContextError(ctx); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("dial rabbitmq: %w", err)
 	}
 	return conn, nil
+}
+
+// dialContextError reports the context error that ended a dial attempt. The
+// socket deadline may equal the context deadline, so a reached deadline is
+// authoritative even when the context timer has not yet published Err.
+func dialContextError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 // ConnectAndEnsure dials, declares and verifies the topology, and verifies the

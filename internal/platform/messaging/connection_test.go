@@ -129,6 +129,87 @@ func TestDialCancellationClosesHandshakeSocket(t *testing.T) {
 	}
 }
 
+// delayedSignalContext models the bounded interval between a deadline passing
+// and the context runtime publishing Done/Err. The socket deadline can fire
+// inside that interval, so Dial must classify the reached deadline without
+// relying on ctx.Err() having become visible yet.
+type delayedSignalContext struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c delayedSignalContext) Deadline() (time.Time, bool) { return c.deadline, true }
+func (c delayedSignalContext) Done() <-chan struct{}       { return nil }
+func (c delayedSignalContext) Err() error                  { return nil }
+
+func TestDialReportsElapsedDeadlineWithoutContextSignal(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+
+	ctx := delayedSignalContext{
+		Context:  context.Background(),
+		deadline: time.Now().Add(100 * time.Millisecond),
+	}
+	cfg := approvedMessagingConfig("amqp://"+testAMQPUsername+":"+testAMQPPassword+"@"+listener.Addr().String(), "http://management.example.com:15672")
+	started := time.Now()
+	_, err = Dial(ctx, cfg)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Dial() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Dial() did not honor the socket deadline promptly: %s", elapsed)
+	}
+	assertNoSecret(t, err, cfg.URI, testAMQPUsername, testAMQPPassword)
+}
+
+func TestDialContextErrorClassification(t *testing.T) {
+	past := time.Now().Add(-time.Second)
+	future := time.Now().Add(time.Minute)
+	canceled, cancelCanceled := context.WithCancel(context.Background())
+	cancelCanceled()
+	expired, cancelExpired := context.WithDeadline(context.Background(), past)
+	defer cancelExpired()
+	active, cancelActive := context.WithDeadline(context.Background(), future)
+	defer cancelActive()
+
+	tests := []struct {
+		name string
+		ctx  context.Context
+		want error
+	}{
+		{name: "no deadline", ctx: context.Background()},
+		{name: "active deadline", ctx: active},
+		{name: "canceled", ctx: canceled, want: context.Canceled},
+		{name: "visible deadline", ctx: expired, want: context.DeadlineExceeded},
+		{name: "lagging deadline", ctx: delayedSignalContext{Context: context.Background(), deadline: past}, want: context.DeadlineExceeded},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := dialContextError(tc.ctx)
+			if tc.want == nil {
+				if got != nil {
+					t.Fatalf("dialContextError() = %v, want nil", got)
+				}
+				return
+			}
+			if !errors.Is(got, tc.want) {
+				t.Fatalf("dialContextError() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDialFailureDoesNotExposeSecrets(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

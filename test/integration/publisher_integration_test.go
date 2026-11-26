@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -40,20 +41,113 @@ func newPublisherSessionWithTimeout(t *testing.T, f *fixture, confirmTimeout tim
 	return session
 }
 
+// dispatchQueueObservation pairs a live queue.declare-ok snapshot with the
+// management API's sampled counters. Only the live values are authoritative:
+// management counters are collected asynchronously and can stay stale for up to
+// one collection interval, which is longer than this assertion's bounded window.
+type dispatchQueueObservation struct {
+	ready            int
+	consumers        int
+	sampledReady     int
+	sampledUnacked   int
+	sampledAvailable bool
+}
+
+func (o dispatchQueueObservation) empty() bool {
+	return o.ready == 0 && o.consumers == 0
+}
+
+type dispatchQueueStateError struct {
+	observation dispatchQueueObservation
+}
+
+func (e *dispatchQueueStateError) Error() string {
+	sampled := "sampled counters unavailable"
+	if e.observation.sampledAvailable {
+		sampled = fmt.Sprintf("sampled ready=%d unacked=%d (may lag)",
+			e.observation.sampledReady, e.observation.sampledUnacked)
+	}
+	return fmt.Sprintf("dispatch queue still contains work: live ready=%d consumers=%d; %s",
+		e.observation.ready, e.observation.consumers, sampled)
+}
+
+func observeDispatchQueue(f *fixture) (dispatchQueueObservation, error) {
+	queue, err := f.inspectCh.QueueDeclarePassive(messaging.DispatchQueue, false, false, false, false, nil)
+	if err != nil {
+		return dispatchQueueObservation{}, fmt.Errorf("observe dispatch queue state: %w", err)
+	}
+	return dispatchQueueObservation{ready: queue.Messages, consumers: queue.Consumers}, nil
+}
+
+// sampleManagement only enriches a failure diagnostic. Sampled management
+// values must never decide whether the queue is drained.
+func (o *dispatchQueueObservation) sampleManagement(ctx context.Context, management *managementClient) {
+	info, err := management.queue(ctx, messaging.DispatchQueue)
+	if err != nil {
+		return
+	}
+	o.sampledReady = info.MessagesReady
+	o.sampledUnacked = info.MessagesUnacknowledged
+	o.sampledAvailable = true
+}
+
 func requireDispatchQueueEmpty(t *testing.T, f *fixture) {
 	t.Helper()
 	eventually(t, 4*time.Second, "dispatch queue to become empty", func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
 		defer cancel()
-		info, err := f.management.queue(ctx, messaging.DispatchQueue)
+		observation, err := observeDispatchQueue(f)
 		if err != nil {
 			return err
 		}
-		if info.MessagesReady != 0 || info.MessagesUnacknowledged != 0 {
-			return errors.New("dispatch queue still contains work")
+		if !observation.empty() {
+			observation.sampleManagement(ctx, f.management)
+			return &dispatchQueueStateError{observation: observation}
 		}
 		return nil
 	})
+}
+
+func TestDispatchQueueDrainIgnoresStaleManagementCountersIntegration(t *testing.T) {
+	f := newFixture(t)
+	stale := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"messages":1,"messages_ready":1,"messages_unacknowledged":1,"consumers":0}`))
+	}))
+	t.Cleanup(stale.Close)
+	original := f.management
+	f.management = &managementClient{baseURL: stale.URL, vhost: "/", client: stale.Client()}
+	t.Cleanup(func() { f.management = original })
+
+	// Prove the sampled predicate this helper previously used would reject the
+	// empty queue before asserting that the live observation accepts it.
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+	defer cancel()
+	info, err := f.management.queue(ctx, messaging.DispatchQueue)
+	if err != nil || info.MessagesReady == 0 || info.MessagesUnacknowledged == 0 {
+		t.Fatalf("stale management fixture = %+v, %v; want nonzero sampled counts", info, err)
+	}
+	requireDispatchQueueEmpty(t, f)
+}
+
+func TestDispatchQueueObservationRejectsLiveWork(t *testing.T) {
+	tests := []struct {
+		name        string
+		observation dispatchQueueObservation
+		wantEmpty   bool
+	}{
+		{name: "empty live queue", observation: dispatchQueueObservation{}, wantEmpty: true},
+		{name: "live ready message", observation: dispatchQueueObservation{ready: 1}, wantEmpty: false},
+		{name: "live consumer", observation: dispatchQueueObservation{consumers: 1}, wantEmpty: false},
+		{name: "sampled counters only", observation: dispatchQueueObservation{sampledReady: 1, sampledUnacked: 1, sampledAvailable: true}, wantEmpty: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.observation.empty(); got != tc.wantEmpty {
+				t.Fatalf("observation.empty() = %t, want %t", got, tc.wantEmpty)
+			}
+		})
+	}
 }
 
 func consumeAndAckPointer(t *testing.T, f *fixture) (messaging.Envelope, amqp.Delivery) {

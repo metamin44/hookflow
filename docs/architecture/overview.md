@@ -3562,3 +3562,47 @@ first full integration run had one transient `TestWorkerEndpointIdentityBindingI
 code changed in Phase 8A. golangci-lint v2.15.0 reported the same 12 pre-existing advisory complexity findings (6
 `cyclop`, 6 `gocognit`) and no finding in the new code; lint cleanliness is not claimed. No commit, push, merge,
 hosted CI run, production deployment or infrastructure change was performed.
+
+### 16.14 Phase 9 delivery history and visibility API (2026-11-26)
+
+This is the Phase 9 product implementation record. It is read-only and uses the existing v13 schema, indexes and
+`delivery_attempts` table: **no schema or migration change was made**, and ingestion, delivery execution, retry
+scheduling, the Publisher, the Worker, retention and audit behavior are untouched. Five authenticated routes expose
+one organization's history to a key with the new independent `deliveries:read` scope: `GET /v1/events`,
+`GET /v1/events/{event_id}`, `GET /v1/deliveries`, `GET /v1/deliveries/{delivery_id}` and
+`GET /v1/deliveries/{delivery_id}/attempts`. The routes never write rows, always send `Cache-Control: no-store`, and
+return the same `404 not_found` for unknown, malformed and cross-tenant identifiers.
+
+`internal/modules/history` owns the store and the opaque cursor. The store executes parameterized, index-compatible
+keyset queries (`events` by `received_at DESC, id DESC`; `deliveries` by `created_at DESC, id DESC`; attempts by
+`attempt_number ASC`), fetches `limit+1` rows to decide continuation and never uses offsets. The cursor is
+`base64url(payload).base64url(HMAC-SHA256)`, versioned, strictly decoded (`DisallowUnknownFields`) and bound to the
+organization, route kind, resource ID, filter fingerprint and the caller's bearer credential: the HMAC key is
+SHA-256 of `hookflow.cursor.key.v1\0` plus the token, because the deployed configuration has no separate cursor
+secret. There is no expiry and no mutable row data in the cursor. Tampered, foreign-credential, route-mismatched or
+filter-mismatched cursors are `400 invalid_cursor`; page size defaults to 50 and is capped at 100. New inserts ahead
+of an open listing do not appear in later pages, and visible rows are neither duplicated nor skipped.
+
+`internal/app/management` owns the HTTP and validation boundary (`history.go`, `history_query.go`,
+`history_http.go`): allowlisted query keys (`type`, `endpoint_id`, state, half-open `received_from`/`received_to` or
+`created_from`/`created_to`, `cursor`, `page_size`), RFC 3339 timestamps with `from < to`, canonical lowercase UUIDs,
+and RFC 9457 `invalid_*`/`unknown_filter`/`insufficient_scope` problems. Event lists expose identifiers, timestamps
+and a per-state delivery count but never payloads or ingestion headers; only `GET /v1/events/{event_id}` returns the
+stored jsonb payload plus up to 100 org-scoped delivery summaries (`deliveries_truncated` when clamped). Delivery
+responses expose the persisted state, attempt count, retry/completion timing, last HTTP status, a derived
+`in_progress` flag (an unexpired dispatch lease) and at most 500 sanitized diagnostic characters. Attempt responses
+expose the stored numbering, outcome, HTTP status, duration and bounded sanitized error only. Receiver URLs,
+request/response headers, response-body snippets, secret envelopes and key material are never projected.
+
+Credential redaction was extracted verbatim from the delivery store into `internal/platform/diagnostics`
+(`Bounded`/`Redact`), which both the Worker's storage path and the read API now share; stored diagnostics therefore
+keep their existing `[REDACTED]` policy and 500-character cap, and response-body snippets remain stored but
+unexposed.
+
+Verification on 2026-11-26 in an LF checkout: `gofmt` clean, `go mod tidy -diff` empty, `go vet ./...` and
+`go build ./...` clean; unit tests passed in 33 test-bearing packages (2 packages without tests, 0 failures); the
+full PostgreSQL/RabbitMQ integration suite passed (0 failures after one transient, later-green
+`TestWorkerEndpointIdentityBindingIntegration` consumer-wait timeout in a first run); Linux CGO `go test -race`
+passed for all unit packages and for the four Phase 9 history integration tests. golangci-lint v2.15.0 reported only
+the same 12 pre-existing advisory complexity findings (6 `cyclop`, 6 `gocognit`), none in Phase 9 code; lint
+cleanliness is not claimed. No dependency, infrastructure, production-deployment or KMS/Vault change was made.

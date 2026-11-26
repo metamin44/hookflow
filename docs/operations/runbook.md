@@ -2,7 +2,7 @@
 
 ## Scope and safety
 
-This runbook covers the Bundle 1 PostgreSQL/RabbitMQ dispatch runtime, the Phase 6 management API and the Phase 7 ingestion API. The API serves health endpoints, `POST /v1/events`, authenticated `/v1` endpoint/subscription management, and the Phase 8A organization subscription lifecycle; organization CRUD is absent. Local execution on 2026-11-24 passed PostgreSQL 18.7/RabbitMQ 4.4.1 and 4.3.8 integration, Linux unit race detection, and real blocked-AMQP-RPC race tests; Phase 7 added destination-policy, ingestion and pre-HTTP disposition coverage (2026-11-25). Hosted runs `45826121102` (push) and `45826131425` (pull request) passed for merged SHA `1128f1042e3d951265aa7a8479b2d42c19a7975d`; PR #1 merged as `2fa7eae66e3835c455bba6e4ca325ddae21e342e`. Stage 8C adds a reusable nightly workflow and a pinned `govulncheck` job; neither has run on GitHub yet. The remediation working tree passed a fresh disposable down-13/up migration drill locally; production HA/outage drills remain pending. golangci-lint v2.15.0 reports advisory findings; lint cleanliness is not claimed.
+This runbook covers the Bundle 1 PostgreSQL/RabbitMQ dispatch runtime, the Phase 6 management API, the Phase 7 ingestion API and the Phase 9 read-only delivery-history API. The API serves health endpoints, `POST /v1/events`, authenticated `/v1` endpoint/subscription management, the Phase 8A organization subscription lifecycle, and the Phase 9 event/delivery/attempt read routes; organization CRUD is absent. Local execution on 2026-11-24 passed PostgreSQL 18.7/RabbitMQ 4.4.1 and 4.3.8 integration, Linux unit race detection, and real blocked-AMQP-RPC race tests; Phase 7 added destination-policy, ingestion and pre-HTTP disposition coverage (2026-11-25). Hosted runs `45826121102` (push) and `45826131425` (pull request) passed for merged SHA `1128f1042e3d951265aa7a8479b2d42c19a7975d`; PR #1 merged as `2fa7eae66e3835c455bba6e4ca325ddae21e342e`. Stage 8C adds a reusable nightly workflow and a pinned `govulncheck` job; neither has run on GitHub yet. The remediation working tree passed a fresh disposable down-13/up migration drill locally; production HA/outage drills remain pending. golangci-lint v2.15.0 reports advisory findings; lint cleanliness is not claimed.
 
 The database is authoritative. RabbitMQ carries durable, identifiers-only pointers; the DLQ is telemetry, not a work queue or replay source. Delivery is at-least-once, so destinations must deduplicate.
 
@@ -66,7 +66,7 @@ go run ./cmd/apikey revoke -organization <org-uuid> -id <key-uuid>
 
 Authentication behaviour: missing or malformed `Authorization` returns `401`; a valid key without the required scope returns `403 insufficient_scope`; unknown prefixes still perform a dummy verification (no prefix oracle); revoked and expired keys fail verification. Suspended organizations may list/get, patch name/description, pause, soft-delete endpoints, deactivate subscriptions, rotate secrets, cancel the organization subscription and revoke API keys, but are denied endpoint creation, activation, URL/header changes, subscription create/reactivate, organization-subscription create/replace and API-key creation. Archived organizations may read under the existing policy but are denied every tenant management write, including endpoint changes/soft-delete, subscription create/reactivate/deactivate, organization-subscription changes/cancellation, rotation and API-key creation/revocation.
 
-Scopes: `endpoints:read` (list/get endpoints and subscriptions), `endpoints:write` (endpoint and subscription writes; implies read; does not grant rotation), `endpoints:secrets:rotate` (rotation only), `billing:read` (read the organization subscription and its history), `billing:write` (create, replace and cancel the organization subscription; implies billing read), and `events:write` (`POST /v1/events`; default when no scopes are supplied). Unknown and wildcard values are ignored.
+Scopes: `endpoints:read` (list/get endpoints and subscriptions), `endpoints:write` (endpoint and subscription writes; implies read; does not grant rotation), `endpoints:secrets:rotate` (rotation only), `billing:read` (read the organization subscription and its history), `billing:write` (create, replace and cancel the organization subscription; implies billing read), `deliveries:read` (the Phase 9 event/delivery/attempt read routes only; independent of every other scope), and `events:write` (`POST /v1/events`; default when no scopes are supplied). Unknown and wildcard values are ignored.
 
 ### Organization subscription lifecycle
 
@@ -106,6 +106,58 @@ schema in overview §5.1/§5.5.
 The `202` body is byte-identical across replay and is returned only after commit. JSONB normalizes
 whitespace/formatting, so the delivered body is the parsed value, not the original bytes. API keys are tenant
 scoped: a key for another organization cannot address this one.
+
+### Delivery history and visibility (`deliveries:read`)
+
+```text
+GET /v1/events                                  event list; never includes payloads
+GET /v1/events/{event_id}                       event metadata + stored payload + delivery summaries
+GET /v1/deliveries                              delivery list with bounded diagnostics
+GET /v1/deliveries/{delivery_id}                delivery detail
+GET /v1/deliveries/{delivery_id}/attempts       attempt history for one delivery
+```
+
+All five routes are read-only, require the independent `deliveries:read` scope and are scoped to the key's own
+organization (there is no organization path). They never write audit rows or any other state. Every response carries
+`Cache-Control: no-store`; unknown, malformed and cross-tenant identifiers all return the same `404 not_found`.
+Read requests cannot reach ingestion, delivery execution, retry scheduling, the Publisher or the Worker.
+
+Filters (all optional; an unrecognized or duplicated query parameter is `400 unknown_filter` / `invalid_filter`):
+
+- `/v1/events`: `type` (exact event type), `endpoint_id` (events with at least one delivery to that endpoint),
+  `received_from` / `received_to` (RFC 3339; `from` inclusive, `to` exclusive), `cursor`, `page_size`.
+- `/v1/deliveries`: `endpoint_id`, `state` (`pending`, `retrying`, `succeeded`, `failed`, `expired`),
+  `created_from` / `created_to` (same half-open window), `cursor`, `page_size`.
+- `…/attempts`: `cursor`, `page_size` only.
+
+Invalid values return `400` with `invalid_event_type`, `invalid_endpoint_id`, `invalid_state`,
+`invalid_time_window` (unparsable timestamp or `from >= to`), `invalid_filter`, `invalid_cursor` or
+`invalid_page_size`.
+
+Pagination is opaque keyset pagination. Omitting `page_size` returns 50 rows; the maximum is 100; anything else is
+`400 invalid_page_size`. When more rows exist the response includes `next_cursor`; pass it back unchanged in
+`cursor`. The cursor is an HMAC-signed token derived from the caller's bearer token and bound to the organization,
+route, resource and filter set. It contains no database offsets or mutable row details and has no expiry. Tampering,
+using another key's cursor, changing filters between pages, or replaying an events cursor on the deliveries route is
+`400 invalid_cursor`; restart without `cursor`. Ordering is stable and deterministic: events by
+`received_at DESC, id DESC`, deliveries by `created_at DESC, id DESC`, and attempts by `attempt_number ASC`
+(oldest first). New rows inserted ahead of an open listing are not seen by later pages of that listing; rows that
+were visible when a listing started are neither duplicated nor skipped.
+
+Event list rows contain `id`, `type`, `received_at`, `created_at` and a per-state `delivery_summary` count. Payloads
+and ingestion headers are only in the single-event response (`payload`, `destination_count`, up to 100 delivery
+summaries with `deliveries_truncated` when clamped). Delivery rows expose `state`, `attempt_count`, retry timing
+(`next_attempt_at`, `last_attempt_at`, `completed_at`), `last_response_status`, `in_progress` (derived from an
+unexpired dispatch lease) and at most 500 characters of sanitized `diagnostic`; the delivery detail adds
+`event_type`, `updated_at` and, for an active lease, `lease_expires_at`. Attempts expose only `attempt_number`,
+`outcome`, `response_status`, `error_class`, bounded `error_message`, `duration_ms` and timestamps. Receiver URLs,
+request/response headers, response-body snippets, secret envelopes, API-key material and credential-bearing
+diagnostics are never returned; stored diagnostics pass the shared redactor (`[REDACTED]`) before truncation.
+
+Troubleshooting: a cursor created with different filters or another API key is rejected by design — restart the
+listing. A `404` on an ID that exists elsewhere means the key belongs to a different organization. If a delivery
+shows `in_progress: true` but no attempt progress, inspect the dispatch lease and Worker logs (see §3 onwards); the
+read API itself has no repair action.
 
 ### Destination policy (OD-4) and private endpoints
 

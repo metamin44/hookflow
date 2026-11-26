@@ -13,6 +13,7 @@ const (
 	ScopeSecretsRotate  = "endpoints:secrets:rotate"
 	ScopeBillingRead    = "billing:read"
 	ScopeBillingWrite   = "billing:write"
+	ScopeDeliveriesRead = "deliveries:read"
 )
 
 // Set is a parsed scope grant. Unknown scopes and wildcards are ignored; an
@@ -24,6 +25,7 @@ type Set struct {
 	secretsRotate  bool
 	billingRead    bool
 	billingWrite   bool
+	deliveriesRead bool
 }
 
 // Parse interprets stored or operator-supplied scope values.
@@ -44,6 +46,8 @@ func Parse(values []string) Set {
 				set.billingRead = true
 			case ScopeBillingWrite:
 				set.billingWrite = true
+			case ScopeDeliveriesRead:
+				set.deliveriesRead = true
 			}
 		}
 	}
@@ -55,7 +59,7 @@ func Parse(values []string) Set {
 
 func (s Set) any() bool {
 	return s.eventsWrite || s.endpointsRead || s.endpointsWrite ||
-		s.secretsRotate || s.billingRead || s.billingWrite
+		s.secretsRotate || s.billingRead || s.billingWrite || s.deliveriesRead
 }
 
 // AllowsEventsWrite reports the events:write capability.
@@ -76,9 +80,13 @@ func (s Set) AllowsBillingRead() bool { return s.billingRead || s.billingWrite }
 // AllowsBillingWrite reports the billing:write capability.
 func (s Set) AllowsBillingWrite() bool { return s.billingWrite }
 
+// AllowsDeliveriesRead reports the deliveries:read capability. It is an
+// independent scope; no other scope implies it and it implies no other scope.
+func (s Set) AllowsDeliveriesRead() bool { return s.deliveriesRead }
+
 // CanonicalStrings renders the granted scopes in the approved storage form.
 func (s Set) CanonicalStrings() []string {
-	granted := make([]string, 0, 6)
+	granted := make([]string, 0, 7)
 	if s.eventsWrite {
 		granted = append(granted, ScopeEventsWrite)
 	}
@@ -96,6 +104,9 @@ func (s Set) CanonicalStrings() []string {
 	}
 	if s.billingWrite {
 		granted = append(granted, ScopeBillingWrite)
+	}
+	if s.deliveriesRead {
+		granted = append(granted, ScopeDeliveriesRead)
 	}
 	slices.Sort(granted)
 	return granted

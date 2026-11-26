@@ -367,11 +367,18 @@ func TestIngestionAPIZeroDestinationsAndMethods(t *testing.T) {
 		t.Fatalf("destination count = %d, want 0", decoded.DestinationCount)
 	}
 
-	method := f.do(http.MethodGet, eventsEndpoint, token, "")
-	if method.status != http.StatusMethodNotAllowed {
-		t.Fatalf("GET events = %d %s", method.status, method.body)
+	read := f.do(http.MethodGet, eventsEndpoint, token, "")
+	if read.status != http.StatusForbidden {
+		t.Fatalf("GET events = %d %s", read.status, read.body)
 	}
-	if got := method.header.Get("Allow"); got != "POST" {
-		t.Errorf("Allow = %q, want POST", got)
+	if problem := decodeMgmt[problemDoc](t, read); problem.Code != "insufficient_scope" {
+		t.Fatalf("GET events code = %q, want insufficient_scope", problem.Code)
+	}
+	method := f.do(http.MethodDelete, eventsEndpoint, token, "")
+	if method.status != http.StatusMethodNotAllowed {
+		t.Fatalf("DELETE events = %d %s", method.status, method.body)
+	}
+	if got := method.header.Get("Allow"); got != "GET, POST" {
+		t.Errorf("Allow = %q, want GET, POST", got)
 	}
 }

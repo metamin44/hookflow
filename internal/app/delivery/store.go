@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -24,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/metamin44/hookflow/internal/modules/endpoint"
+	"github.com/metamin44/hookflow/internal/platform/diagnostics"
 )
 
 // Beginner is satisfied by *pgxpool.Pool and by pgx.Tx.
@@ -961,51 +961,14 @@ const (
 	maxResponseSnippetRunes = 2000
 )
 
-// Credential-bearing patterns are redacted conservatively before storage. The
-// coverage is recognizable key/value forms (including JSON-quoted keys), bearer
-// and basic authorization values, and cookie headers; unstructured payloads are
-// outside this guarantee.
-var (
-	credentialCookieRE = regexp.MustCompile(
-		`(?i)\b(cookie|set[_-]?cookie)\b(["']?\s*[:=]\s*)[^;]*(?:;\s*[A-Za-z0-9!#$%&'*+.^_` + "`" + `|~-]+\s*=\s*[^;]*)*`,
-	)
-	credentialFieldRE = regexp.MustCompile(
-		`(?i)\b(authorization|proxy-authorization|x-api-key|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|pwd|secret)\b(["']?\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|(?:bearer|basic)\s+[^\s,;&]+|[^\s,;&]+)`,
-	)
-	credentialBearerRE = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+`)
-)
+// Credential-bearing patterns are redacted conservatively before storage by
+// platform/diagnostics; this package keeps the approved storage limit here.
 
 // boundedDiagnostic normalizes a raw diagnostic, redacts recognizable
 // credential-bearing values, collapses whitespace and truncates to the approved
 // character limit without splitting a UTF-8 code point.
 func boundedDiagnostic(value string) string {
-	value = strings.ToValidUTF8(value, "?")
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	value = strings.Map(func(r rune) rune {
-		switch r {
-		case 0, '\r', '\n', '\t':
-			return ' '
-		}
-		if r < 0x20 || r == 0x7f {
-			return ' '
-		}
-		return r
-	}, value)
-	value = strings.Join(strings.Fields(value), " ")
-	value = scrubCredentials(value)
-	if runes := []rune(value); len(runes) > diagnosticLimit {
-		value = string(runes[:diagnosticLimit])
-	}
-	return value
-}
-
-func scrubCredentials(value string) string {
-	value = credentialCookieRE.ReplaceAllString(value, "$1$2[REDACTED]")
-	value = credentialFieldRE.ReplaceAllString(value, "$1$2[REDACTED]")
-	return credentialBearerRE.ReplaceAllString(value, "Bearer [REDACTED]")
+	return diagnostics.Bounded(value, diagnosticLimit)
 }
 
 func validUUID(value string) bool {

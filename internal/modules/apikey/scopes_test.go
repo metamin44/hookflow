@@ -15,6 +15,7 @@ func TestParseScopes(t *testing.T) {
 		events       bool
 		billingRead  bool
 		billingWrite bool
+		deliveries   bool
 		canon        []string
 	}{
 		{
@@ -87,6 +88,26 @@ func TestParseScopes(t *testing.T) {
 			billingRead: true,
 			canon:       []string{ScopeBillingRead},
 		},
+		{
+			name:       "deliveries read is independent",
+			input:      []string{ScopeDeliveriesRead},
+			deliveries: true,
+			canon:      []string{ScopeDeliveriesRead},
+		},
+		{
+			name:         "deliveries read does not imply billing or endpoint scopes",
+			input:        []string{"deliveries:read,billing:write"},
+			billingRead:  true,
+			billingWrite: true,
+			deliveries:   true,
+			canon:        []string{ScopeBillingRead, ScopeBillingWrite, ScopeDeliveriesRead},
+		},
+		{
+			name:   "delivery wildcard is not a scope",
+			input:  []string{"deliveries:*"},
+			events: true,
+			canon:  []string{ScopeEventsWrite},
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -108,6 +129,9 @@ func TestParseScopes(t *testing.T) {
 			}
 			if set.AllowsBillingWrite() != testCase.billingWrite {
 				t.Fatalf("AllowsBillingWrite() = %v, want %v", set.AllowsBillingWrite(), testCase.billingWrite)
+			}
+			if set.AllowsDeliveriesRead() != testCase.deliveries {
+				t.Fatalf("AllowsDeliveriesRead() = %v, want %v", set.AllowsDeliveriesRead(), testCase.deliveries)
 			}
 			if got := set.CanonicalStrings(); !reflect.DeepEqual(got, testCase.canon) {
 				t.Fatalf("CanonicalStrings() = %v, want %v", got, testCase.canon)

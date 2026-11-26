@@ -267,14 +267,14 @@ func TestEventsRouteMethodNotAllowed(t *testing.T) {
 		mux:     http.NewServeMux(),
 	}
 	handler.routes()
-	request := httptest.NewRequest(http.MethodGet, eventsPath, nil)
+	request := httptest.NewRequest(http.MethodDelete, eventsPath, nil)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("GET status = %d, want 405", recorder.Code)
+		t.Fatalf("DELETE status = %d, want 405", recorder.Code)
 	}
-	if got := recorder.Header().Get("Allow"); got != "POST" {
-		t.Errorf("Allow = %q, want POST", got)
+	if got := recorder.Header().Get("Allow"); got != "GET, POST" {
+		t.Errorf("Allow = %q, want GET, POST", got)
 	}
 	var body problem
 	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {

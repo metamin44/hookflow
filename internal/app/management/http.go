@@ -64,7 +64,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.Serv
 
 func (h *Handler) routes() {
 	h.mux.HandleFunc("POST "+eventsPath, h.ingestEvent)
-	h.mux.HandleFunc(eventsPath, h.methodNotAllowed("POST"))
+	h.mux.HandleFunc("GET "+eventsPath, h.listEvents)
+	h.mux.HandleFunc("GET "+eventPath, h.getEvent)
+	h.mux.HandleFunc("GET "+deliveriesPath, h.listDeliveries)
+	h.mux.HandleFunc("GET "+deliveryPath, h.getDelivery)
+	h.mux.HandleFunc("GET "+attemptsPath, h.listDeliveryAttempts)
 
 	h.mux.HandleFunc("POST "+endpointsPath, h.createEndpoint)
 	h.mux.HandleFunc("GET "+endpointsPath, h.listEndpoints)
@@ -88,6 +92,11 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc(subscriptionPath, h.methodNotAllowed("DELETE"))
 	h.mux.HandleFunc(organizationSubscriptionPath, h.methodNotAllowed("GET, PUT, DELETE"))
 	h.mux.HandleFunc(organizationSubscriptionsPath, h.methodNotAllowed("GET"))
+	h.mux.HandleFunc(eventsPath, h.methodNotAllowed("GET, POST"))
+	h.mux.HandleFunc(eventPath, h.methodNotAllowed("GET"))
+	h.mux.HandleFunc(deliveriesPath, h.methodNotAllowed("GET"))
+	h.mux.HandleFunc(deliveryPath, h.methodNotAllowed("GET"))
+	h.mux.HandleFunc(attemptsPath, h.methodNotAllowed("GET"))
 	h.mux.HandleFunc("/", h.unknownRoute)
 }
 

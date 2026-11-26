@@ -32,10 +32,13 @@ HookFlow reads process configuration from the environment. `.env.example` contai
 | `HOOKFLOW_API_ADDR` | `cmd/api` | `:8080` | Listen `host:port`; port `1..65535`; host must not contain whitespace or `/`. An empty host binds all interfaces. |
 | `HOOKFLOW_MAX_ACTIVE_ENDPOINTS_PER_ORG` | `cmd/api` | `100` when unset | Present value must be a positive integer; empty or whitespace-only is invalid. Per-organization ceiling for live `active` endpoints (U37), enforced under the organization row lock (U38). Lowering it later does not pause or delete existing endpoints. |
 
-Routes: `GET /health/live`, `GET /health/ready`, the Phase 7 ingestion route `POST /v1/events`, and the
+Routes: `GET /health/live`, `GET /health/ready`, the Phase 7 ingestion route `POST /v1/events`, the
 Phase 6 management API under `/v1/organizations/{organization_id}/endpoints` (create/list, get/PATCH/DELETE,
-secret rotation, subscriptions). Every `/v1/` route except ingestion requires an API key; `POST /v1/events`
-requires an API key with `events:write`. Unknown routes return RFC 9457 `404`, wrong methods `405` with `Allow`.
+secret rotation, subscriptions), and the Phase 8A organization subscription at
+`/v1/organizations/{organization_id}/subscription` with append-only history at `…/subscriptions`. Every `/v1/`
+route except ingestion requires an API key; `POST /v1/events` requires `events:write`, and organization
+subscription routes require `billing:read` or `billing:write`. Unknown routes return RFC 9457 `404`, wrong methods
+`405` with `Allow`.
 Readiness pings PostgreSQL; it does not imply RabbitMQ or delivery readiness.
 
 `cmd/api` also loads the delivery-security block below because secret rotation wraps envelopes with the same KEK
@@ -269,17 +272,20 @@ Argon2id PHC verifier, so a lost token must be revoked and replaced. Send it as 
 | `endpoints:read` | List/get endpoints and subscriptions. |
 | `endpoints:write` | Endpoint create/list/get/patch/delete and subscription create/reactivate/deactivate; implies `endpoints:read`. It does **not** grant secret rotation. |
 | `endpoints:secrets:rotate` | `POST …/secret/rotate` only; it does not imply metadata read/write or any other write. |
+| `billing:read` | `GET …/subscription` and `GET …/subscriptions` for the key's own organization. |
+| `billing:write` | `PUT`/`DELETE …/subscription`; implies `billing:read`. |
 
 Unknown or wildcard scope strings are ignored. A key is valid until revoked or `expires_at`.
 
 Organization policy (all tenant writes are denied for archived organizations):
 
 - **Suspended:** allowed — reads, secret rotation, `name`/`description` updates, pausing, endpoint soft-delete,
-  subscription deactivation, and API-key revocation. Denied (`403 organization_suspended`) — endpoint creation,
-  `url`/`http_headers` changes, activation, subscription create/reactivate, and API-key creation.
+  subscription deactivation, organization-subscription cancellation, and API-key revocation. Denied
+  (`403 organization_suspended`) — endpoint creation, `url`/`http_headers` changes, activation, subscription
+  create/reactivate, organization-subscription create/replace, and API-key creation.
 - **Archived:** allowed — reads under the existing policy. Denied (`403 organization_archived`) — every tenant
-  management write, including endpoint changes and soft-delete, subscription create/reactivate/deactivate, secret
-  rotation, and API-key creation/revocation.
+  management write, including endpoint changes and soft-delete, subscription create/reactivate/deactivate,
+  organization-subscription create/replace/cancellation, secret rotation, and API-key creation/revocation.
 
 Cross-organization paths return `404`.
 
@@ -297,4 +303,7 @@ Cross-organization paths return `404`.
   rejected as `400 invalid_url` on create and PATCH. A hostname is also checked with a bounded 2 s DNS
   preflight: a prohibited answer is `400 invalid_url`; a DNS failure is allowed, because delivery-time
   enforcement (not this advisory preflight) is authoritative and re-runs on every attempt.
+- The organization subscription is replaced as a whole with `PUT`; when an open period exists it requires `If-Match`
+  (`428`/`412` semantics are identical to PATCH). A plan change appends a period and cancels its predecessor, while a
+  same-plan status or period change rewrites the open row. `DELETE` cancels the current period and retains history.
 - All management writes append `audit_logs` rows with the acting API-key id and the changed field names only.

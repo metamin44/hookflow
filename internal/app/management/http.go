@@ -11,17 +11,20 @@ import (
 
 	"github.com/metamin44/hookflow/internal/modules/apikey"
 	"github.com/metamin44/hookflow/internal/modules/endpoint"
+	"github.com/metamin44/hookflow/internal/modules/orgsubscription"
 	"github.com/metamin44/hookflow/internal/modules/subscription"
 	"github.com/metamin44/hookflow/internal/platform/secrets"
 )
 
 const (
-	organizationsPath = "/v1/organizations/{organization_id}"
-	endpointsPath     = organizationsPath + "/endpoints"
-	endpointPath      = endpointsPath + "/{endpoint_id}"
-	rotatePath        = endpointPath + "/secret/rotate"
-	subscriptionsPath = endpointPath + "/subscriptions"
-	subscriptionPath  = subscriptionsPath + "/{subscription_id}"
+	organizationsPath             = "/v1/organizations/{organization_id}"
+	endpointsPath                 = organizationsPath + "/endpoints"
+	endpointPath                  = endpointsPath + "/{endpoint_id}"
+	rotatePath                    = endpointPath + "/secret/rotate"
+	subscriptionsPath             = endpointPath + "/subscriptions"
+	subscriptionPath              = subscriptionsPath + "/{subscription_id}"
+	organizationSubscriptionPath  = organizationsPath + "/subscription"
+	organizationSubscriptionsPath = organizationsPath + "/subscriptions"
 )
 
 // Handler mounts the management routes on an http.ServeMux.
@@ -73,11 +76,18 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("POST "+subscriptionsPath, h.createSubscription)
 	h.mux.HandleFunc("DELETE "+subscriptionPath, h.deleteSubscription)
 
+	h.mux.HandleFunc("GET "+organizationSubscriptionPath, h.getOrganizationSubscription)
+	h.mux.HandleFunc("PUT "+organizationSubscriptionPath, h.putOrganizationSubscription)
+	h.mux.HandleFunc("DELETE "+organizationSubscriptionPath, h.cancelOrganizationSubscription)
+	h.mux.HandleFunc("GET "+organizationSubscriptionsPath, h.listOrganizationSubscriptions)
+
 	h.mux.HandleFunc(endpointsPath, h.methodNotAllowed("GET, POST"))
 	h.mux.HandleFunc(endpointPath, h.methodNotAllowed("GET, PATCH, DELETE"))
 	h.mux.HandleFunc(rotatePath, h.methodNotAllowed("POST"))
 	h.mux.HandleFunc(subscriptionsPath, h.methodNotAllowed("GET, POST"))
 	h.mux.HandleFunc(subscriptionPath, h.methodNotAllowed("DELETE"))
+	h.mux.HandleFunc(organizationSubscriptionPath, h.methodNotAllowed("GET, PUT, DELETE"))
+	h.mux.HandleFunc(organizationSubscriptionsPath, h.methodNotAllowed("GET"))
 	h.mux.HandleFunc("/", h.unknownRoute)
 }
 
@@ -293,6 +303,97 @@ func (h *Handler) deleteSubscription(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, record.Represent())
 }
 
+func (h *Handler) getOrganizationSubscription(w http.ResponseWriter, r *http.Request) {
+	identity, scopes, ok := h.authenticate(w, r)
+	if !ok || !h.sameTenant(w, r, identity) {
+		return
+	}
+	if !scopes.AllowsBillingRead() {
+		h.writeError(w, r, insufficientScope())
+		return
+	}
+	record, err := h.service.GetOrganizationSubscription(r.Context(), identity.OrganizationID)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	setOrganizationSubscriptionETag(w, record)
+	writeJSON(w, http.StatusOK, record.Represent())
+}
+
+func (h *Handler) listOrganizationSubscriptions(w http.ResponseWriter, r *http.Request) {
+	identity, scopes, ok := h.authenticate(w, r)
+	if !ok || !h.sameTenant(w, r, identity) {
+		return
+	}
+	if !scopes.AllowsBillingRead() {
+		h.writeError(w, r, insufficientScope())
+		return
+	}
+	records, err := h.service.ListOrganizationSubscriptions(r.Context(), identity.OrganizationID)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	documents := make([]orgsubscription.Representation, 0, len(records))
+	for _, record := range records {
+		documents = append(documents, record.Represent())
+	}
+	writeJSON(w, http.StatusOK, organizationSubscriptionsResponse{Subscriptions: documents})
+}
+
+func (h *Handler) putOrganizationSubscription(w http.ResponseWriter, r *http.Request) {
+	identity, scopes, ok := h.authenticate(w, r)
+	if !ok || !h.sameTenant(w, r, identity) {
+		return
+	}
+	if !scopes.AllowsBillingWrite() {
+		h.writeError(w, r, insufficientScope())
+		return
+	}
+	document, appErr := decodeObject(w, r)
+	if appErr != nil {
+		h.writeError(w, r, appErr)
+		return
+	}
+	decoded, appErr := decodeOrganizationSubscription(document)
+	if appErr != nil {
+		h.writeError(w, r, appErr)
+		return
+	}
+	result, err := h.service.PutOrganizationSubscription(r.Context(), identity, requestMeta(r),
+		OrganizationSubscriptionInput(decoded), ifMatchHeader(r))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	setOrganizationSubscriptionETag(w, result.Record)
+	status := http.StatusOK
+	if result.Created {
+		status = http.StatusCreated
+		w.Header().Set("Location", "/v1/organizations/"+identity.OrganizationID+"/subscription")
+	}
+	writeJSON(w, status, result.Record.Represent())
+}
+
+func (h *Handler) cancelOrganizationSubscription(w http.ResponseWriter, r *http.Request) {
+	identity, scopes, ok := h.authenticate(w, r)
+	if !ok || !h.sameTenant(w, r, identity) {
+		return
+	}
+	if !scopes.AllowsBillingWrite() {
+		h.writeError(w, r, insufficientScope())
+		return
+	}
+	record, err := h.service.CancelOrganizationSubscription(r.Context(), identity, requestMeta(r))
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	setOrganizationSubscriptionETag(w, record)
+	writeJSON(w, http.StatusOK, record.Represent())
+}
+
 func (h *Handler) methodNotAllowed(allow string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, r, methodNotAllowed(allow))
@@ -354,6 +455,10 @@ func setETag(w http.ResponseWriter, representation endpoint.Representation, secr
 	w.Header().Set("ETag", endpoint.QuotedHeader(endpoint.StrongTag(representation, secretEncrypted)))
 }
 
+func setOrganizationSubscriptionETag(w http.ResponseWriter, record orgsubscription.Record) {
+	w.Header().Set("ETag", endpoint.QuotedHeader(orgsubscription.StrongTag(record.Represent())))
+}
+
 func endpointLocation(organizationID, endpointID string) string {
 	return "/v1/organizations/" + organizationID + "/endpoints/" + endpointID
 }
@@ -368,6 +473,10 @@ type endpointsResponse struct {
 
 type subscriptionsResponse struct {
 	Subscriptions []subscription.Representation `json:"subscriptions"`
+}
+
+type organizationSubscriptionsResponse struct {
+	Subscriptions []orgsubscription.Representation `json:"subscriptions"`
 }
 
 type createEndpointResponse struct {

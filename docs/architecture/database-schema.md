@@ -1061,6 +1061,12 @@ provider-object references. Whether quota columns (`max_endpoints`, `max_events_
 references belong in V1 is unresolved (U19) — enforcement of plan limits is not part of the agreed
 decision set.
 
+Phase 8A implementation uses this table without schema changes. The single open row is the current
+subscription; `canceled` is terminal. A plan change cancels the open row (setting `canceled_at`) and inserts a
+new open row, while a same-plan status or period change updates the open row and sets `updated_at = now()`.
+The API never writes a canceled row directly, never sets a price, quota or entitlement, and relies on
+`uq_org_subs_open` as the final concurrency authority.
+
 ### 4.12 `audit_logs` — administrative trail (append-only)
 
 | Column | Type | | Description |

@@ -3529,3 +3529,36 @@ The API optionally starts the shared process-local metrics server through `HOOKF
 route is added to the public API mux. Configuration rejects wildcard/unspecified literals (including scoped and mapped
 IPv6 forms), and the shared server verifies the actual bound TCP address before serving. Non-loopback exposure still
 requires an approved scrape topology and network ACL/firewall restrictions. No schema, migration or dependency changed.
+
+### 16.13 Phase 8A organization subscription lifecycle (2026-11-26)
+
+This is the Phase 8A product implementation record. It uses the existing `organization_subscriptions` table from
+migration unit 11: **no schema or migration change was made**. The new `internal/modules/orgsubscription` package
+owns period persistence and a domain-separated strong ETag. The management service, under the existing organization
+`FOR NO KEY UPDATE` lock, exposes one current-period resource at
+`GET`/`PUT`/`DELETE /v1/organizations/{org}/subscription` and append-only history at
+`GET /v1/organizations/{org}/subscriptions`.
+
+`PUT` is a full replacement over `plan` (`free`, `pro`, `enterprise`), an open `status` (`trialing`, `active`,
+`past_due`, `incomplete`) and optional RFC 3339 period/trial timestamps. `canceled` is reachable only through
+`DELETE`. When an open period exists, `PUT` requires the strong `If-Match` value (`428` absent, `412` stale or weak,
+`412` when a header is sent but no period exists). A plan change cancels the current row with `canceled_at` and
+appends a new open row, preserving history; a same-plan status or period change updates the open row. A no-op
+`PUT` performs no write, no audit row and returns the current tag. `uq_org_subs_open` remains the final concurrency
+authority and is mapped to `409 subscription_exists`.
+
+Authorization uses two new explicitly granted scopes: `billing:read` and `billing:write` (write implies read).
+Endpoint, ingestion and API-key scopes are unchanged. Archived organizations can read but cannot change or cancel;
+suspended organizations can read and cancel but cannot create or replace. Audit actions are
+`organization_subscription.created`, `.updated`, `.plan_changed` and `.canceled`, with
+`target_type='organization_subscription'`. The implementation contains no price, invoice, payment-provider, quota,
+usage-limit or entitlement logic; U19 remains open.
+
+Verification on 2026-11-26 in an LF checkout: unit tests passed in 32 packages (2 packages without tests, 0 failures);
+the full integration suite passed on rerun (33 packages including `test/integration`, 0 failures); Linux CGO race
+tests passed for all unit packages and for the four new billing integration top-level tests; `go vet` was clean. A
+first full integration run had one transient `TestWorkerEndpointIdentityBindingIntegration` consumer-wait timeout
+(`ready=1`); that test passed in isolation and the full suite passed on the next run, and no Worker/Publisher/Messaging
+code changed in Phase 8A. golangci-lint v2.15.0 reported the same 12 pre-existing advisory complexity findings (6
+`cyclop`, 6 `gocognit`) and no finding in the new code; lint cleanliness is not claimed. No commit, push, merge,
+hosted CI run, production deployment or infrastructure change was performed.

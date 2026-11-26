@@ -1,0 +1,21 @@
+name: Nightly verification
+
+# Reuses the complete CI matrix instead of duplicating jobs: format/vet/build,
+# unit, JCS conformance and fuzzing, both RabbitMQ integration versions, race,
+# vulnerability scanning and advisory lint.
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  full-ci:
+    name: Full CI matrix
+    uses: ./.github/workflows/ci.yml

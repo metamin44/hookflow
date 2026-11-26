@@ -22,11 +22,12 @@ const (
 	ActorService = "service"
 )
 
-// Target types used by Phase 6.
+// Target types used by the management and billing APIs.
 const (
-	TargetEndpoint     = "endpoint"
-	TargetSubscription = "endpoint_subscription"
-	TargetAPIKey       = "api_key"
+	TargetEndpoint                 = "endpoint"
+	TargetSubscription             = "endpoint_subscription"
+	TargetOrganizationSubscription = "organization_subscription"
+	TargetAPIKey                   = "api_key"
 )
 
 // Record is one audit_logs row. ActorID and TargetID are optional.

@@ -28,7 +28,7 @@ commands:
   list    -organization <uuid>
   revoke  -organization <uuid> -id <uuid>
 
-scopes: events:write, endpoints:read, endpoints:write, endpoints:secrets:rotate
+scopes: events:write, endpoints:read, endpoints:write, endpoints:secrets:rotate, billing:read, billing:write
 `
 
 func main() {

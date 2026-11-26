@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"time"
 )
 
 // maxBodyBytes bounds every Phase 6 management document.
@@ -50,6 +51,12 @@ var forbiddenFields = map[string]struct{}{
 	"signing_scheme": {}, "timeout_ms": {}, "max_attempts": {},
 	"deleted_at": {}, "created_at": {}, "updated_at": {},
 	"last_success_at": {}, "last_failure_at": {},
+}
+
+// organizationSubscriptionFields is the full-replacement allowlist.
+var organizationSubscriptionFields = map[string]struct{}{
+	"plan": {}, "status": {}, "current_period_start": {},
+	"current_period_end": {}, "trial_ends_at": {},
 }
 
 func decodeObject(w http.ResponseWriter, r *http.Request) (map[string]json.RawMessage, *HTTPError) {
@@ -172,6 +179,85 @@ func decodePatch(document map[string]json.RawMessage) (patchDocument, *HTTPError
 		return patchDocument{}, badRequest("empty_patch", "request must contain at least one writable field")
 	}
 	return decoded, nil
+}
+
+// subscriptionDocument is the decoded organization-subscription replacement.
+type subscriptionDocument struct {
+	Plan               string
+	Status             string
+	CurrentPeriodStart *time.Time
+	CurrentPeriodEnd   *time.Time
+	TrialEndsAt        *time.Time
+}
+
+func decodeOrganizationSubscription(document map[string]json.RawMessage) (subscriptionDocument, *HTTPError) {
+	var decoded subscriptionDocument
+	for key, raw := range document {
+		if _, forbidden := forbiddenFields[key]; forbidden || key == "canceled_at" {
+			return subscriptionDocument{}, forbiddenField(key)
+		}
+		if _, allowed := organizationSubscriptionFields[key]; !allowed {
+			return subscriptionDocument{}, unknownField(key)
+		}
+		switch key {
+		case "plan":
+			value, appErr := decodeStringField(raw, "plan", "invalid_plan")
+			if appErr != nil {
+				return subscriptionDocument{}, appErr
+			}
+			decoded.Plan = value
+		case "status":
+			value, appErr := decodeStringField(raw, "status", "invalid_status")
+			if appErr != nil {
+				return subscriptionDocument{}, appErr
+			}
+			decoded.Status = value
+		case "current_period_start":
+			value, appErr := decodeOptionalTime(raw, "current_period_start")
+			if appErr != nil {
+				return subscriptionDocument{}, appErr
+			}
+			decoded.CurrentPeriodStart = value
+		case "current_period_end":
+			value, appErr := decodeOptionalTime(raw, "current_period_end")
+			if appErr != nil {
+				return subscriptionDocument{}, appErr
+			}
+			decoded.CurrentPeriodEnd = value
+		case "trial_ends_at":
+			value, appErr := decodeOptionalTime(raw, "trial_ends_at")
+			if appErr != nil {
+				return subscriptionDocument{}, appErr
+			}
+			decoded.TrialEndsAt = value
+		}
+	}
+	if _, present := document["plan"]; !present {
+		return subscriptionDocument{}, fieldRejection("plan", "invalid_plan", "plan is required")
+	}
+	if _, present := document["status"]; !present {
+		return subscriptionDocument{}, fieldRejection("status", "invalid_status", "status is required")
+	}
+	return decoded, nil
+}
+
+func decodeOptionalTime(raw json.RawMessage, field string) (*time.Time, *HTTPError) {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return nil, fieldRejection(field, "invalid_"+field, field+" must be an RFC 3339 timestamp or null")
+	}
+	value, err := time.Parse(time.RFC3339, text)
+	if err != nil {
+		return nil, fieldRejection(field, "invalid_"+field, field+" must be an RFC 3339 timestamp or null")
+	}
+	// PostgreSQL timestamptz stores microseconds; normalize before validation so
+	// a sub-microsecond difference cannot pass the application and fail the DB
+	// period check.
+	normalized := value.UTC().Truncate(time.Microsecond)
+	return &normalized, nil
 }
 
 func decodeStringField(raw json.RawMessage, field, code string) (string, *HTTPError) {

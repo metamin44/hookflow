@@ -4,6 +4,7 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -20,6 +21,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
@@ -50,6 +53,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
@@ -157,6 +162,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
@@ -198,6 +205,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
@@ -206,6 +215,52 @@ jobs:
       - name: Race tests
         run: go test -race ./... -count=1
 
+  vulnerability:
+    name: Go vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.27.4"
+          cache-dependency-path: go.sum
+      - name: Install pinned govulncheck
+        run: |
+          # The module version is the reproducibility pin. govulncheck exits 3
+          # only for reachable (symbol) findings; package/module-only findings
+          # are reported without modifying go.mod or go.sum.
+          go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+          "$(go env GOPATH)/bin/govulncheck" -version
+      - name: Scan source and required modules
+        run: |
+          set -o pipefail
+          "$(go env GOPATH)/bin/govulncheck" -show=verbose ./... | tee "$RUNNER_TEMP/hookflow-govulncheck.txt"
+      - name: Publish vulnerability findings
+        if: always()
+        run: |
+          {
+            echo '### govulncheck'
+            echo
+            echo 'Reachable (symbol) findings fail this job. Package and module findings that no code path reaches are reported below; this workflow never edits `go.mod` or `go.sum` to suppress them.'
+            echo
+            echo '```'
+            if [ -f "$RUNNER_TEMP/hookflow-govulncheck.txt" ]; then
+              if grep -q '^=== Symbol Results ===' "$RUNNER_TEMP/hookflow-govulncheck.txt"; then
+                sed -n '/^=== Symbol Results ===/,$p' "$RUNNER_TEMP/hookflow-govulncheck.txt"
+              else
+                cat "$RUNNER_TEMP/hookflow-govulncheck.txt"
+              fi
+            else
+              echo 'No govulncheck output was produced.'
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   lint:
     name: golangci-lint (advisory)
     runs-on: ubuntu-latest
@@ -213,6 +268,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:

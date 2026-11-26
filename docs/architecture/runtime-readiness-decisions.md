@@ -590,7 +590,7 @@ The sealed secret and DEK never appear in logs, metrics labels, errors, test nam
 
 ## 9. Decision group D7 - CI and integration-test infrastructure (U30 plus U34)
 
-**Status:** owner-authorized D7 and U34 service-container CI are implemented in `.github/workflows/ci.yml` with `.golangci.yml`. Workflow execution is **verification pending**; lint remains advisory with `continue-on-error: true`. Govulncheck is not enabled because no exact tool/action pin was verified for this change.
+**Status:** owner-authorized D7 and U34 service-container CI are implemented in `.github/workflows/ci.yml` with `.golangci.yml`. Hosted runs `45826121102` (push) and `45826131425` (pull request) passed for merged SHA `1128f1042e3d951265aa7a8479b2d42c19a7975d`. Stage 8C adds `govulncheck` v1.10.0 and a reusable nightly workflow; nightly execution is **verification pending** on GitHub. Lint remains advisory with `continue-on-error: true`.
 
 | Check | Runs on | Implemented content |
 | --- | --- | --- |
@@ -601,13 +601,18 @@ The sealed secret and DEK never appear in logs, metrics labels, errors, test nam
 | Integration | every change, separate matrix job | PostgreSQL 18 service container pinned to the `compose.yaml` digest; RabbitMQ 4.4.1/4.3.8 management-alpine images pinned by supplied multi-arch digests; migrate up; `go test -tags=integration ./... -count=1 -p 1`; migrate down 13; migrate up all 13; print version |
 | Race | every change on Ubuntu | `CGO_ENABLED=1 go test -race ./... -count=1` |
 | Lint | every change, **advisory** | golangci-lint v2.15.0 via `golangci/golangci-lint-action` v9.3.0; `.golangci.yml` includes core analysis, bounded complexity, `depguard` layering and the `platformhttp` alias |
+| Vulnerability scan | every change, separate job | `go install golang.org/x/vuln/cmd/govulncheck@v1.10.0`; `govulncheck -show=verbose ./...`; reachable (symbol) findings fail the job; package/module-only findings are published to the job summary; no `go.mod`/`go.sum` edit or automatic upgrade |
+| Nightly | daily schedule plus manual dispatch | `.github/workflows/nightly.yml` calls `ci.yml` through `workflow_call` at 02:17 UTC; reuses format/vet/build/unit, JCS, both RabbitMQ integrations, race, vulnerability and lint jobs without duplicating steps |
+| Workflow hardening | all jobs | Top-level `contents: read`; checkout `persist-credentials: false`; third-party actions pinned by commit SHA; no repository secrets exposed to workflow code |
 | Actions | all jobs | Full commit pins verified through the official GitHub API on 2026-11-24: checkout v7.0.1 `3d3c42e5aac5ba805825da76410c181273ba90b1`; setup-go v7.1.0 `d8cbb8045d7f43706b9177cceb36c1f91a6644d5`; golangci-lint-action v9.3.0 `ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a` |
 
-**U34 implementation:** CI uses GitHub-managed PostgreSQL/RabbitMQ service containers rather than testcontainers, adding no Go dependency. The PostgreSQL digest matches `compose.yaml`; local Compose remains the developer environment. Service credentials are disposable CI-only environment values and are never echoed.
+**U34 implementation:** CI uses GitHub-managed PostgreSQL/RabbitMQ service containers rather than testcontainers, adding no Go dependency. The PostgreSQL digest matches `compose.yaml`; local Compose remains the developer environment. Service credentials are disposable CI-only environment values and are never echoed. `govulncheck` is installed at a pinned module version by the Go toolchain; it is a CI tool, not an application dependency.
 
-**Branch protection:** not changed by D7. Required-check policy, no-force-push rules, linear history and review requirements remain repository-administration work.
+**Stage 8C baseline:** local `govulncheck` v1.10.0 reported 0 reachable vulnerabilities and 1 module-only finding, `GO-2026-5932` for `golang.org/x/crypto/openpgp` in `golang.org/x/crypto v0.58.0`. HookFlow does not import or call that package; no dependency change was made, and the finding is reported rather than suppressed.
 
-**D7 boundary:** no production Go code, existing test, compose file, `.env.example`, script, migration or module manifest is changed. The workflow and lint configuration are documentation/CI changes only; their first real run remains pending.
+**Branch protection:** not changed by D7 or Stage 8C. Required-check policy, no-force-push rules, linear history and review requirements remain repository-administration work. The new vulnerability job is not added to required checks by workflow code.
+
+**D7 boundary:** no production Go code, existing test, compose file, `.env.example`, script, migration or module manifest is changed. Stage 8C changes workflows and documentation only; nightly execution remains pending.
 
 ---
 

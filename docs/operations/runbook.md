@@ -66,7 +66,7 @@ go run ./cmd/apikey revoke -organization <org-uuid> -id <key-uuid>
 
 Authentication behaviour: missing or malformed `Authorization` returns `401`; a valid key without the required scope returns `403 insufficient_scope`; unknown prefixes still perform a dummy verification (no prefix oracle); revoked and expired keys fail verification. Suspended organizations may list/get, patch name/description, pause, soft-delete endpoints, deactivate subscriptions, rotate secrets, cancel the organization subscription and revoke API keys, but are denied endpoint creation, activation, URL/header changes, subscription create/reactivate, organization-subscription create/replace and API-key creation. Archived organizations may read under the existing policy but are denied every tenant management write, including endpoint changes/soft-delete, subscription create/reactivate/deactivate, organization-subscription changes/cancellation, rotation and API-key creation/revocation.
 
-Scopes: `endpoints:read` (list/get endpoints and subscriptions), `endpoints:write` (endpoint and subscription writes; implies read; does not grant rotation), `endpoints:secrets:rotate` (rotation only), `billing:read` (read the organization subscription and its history), `billing:write` (create, replace and cancel the organization subscription; implies billing read), `deliveries:read` (the Phase 9 event/delivery/attempt read routes only; independent of every other scope), `deliveries:retry` (`POST /v1/deliveries/{delivery_id}/retry` only; independent of `deliveries:read` and every other scope), and `events:write` (`POST /v1/events`; default when no scopes are supplied). Unknown and wildcard values are ignored.
+Scopes: `endpoints:read` (list/get endpoints and subscriptions), `endpoints:write` (endpoint and subscription writes; implies read; does not grant rotation), `endpoints:secrets:rotate` (rotation only), `billing:read` (read the organization subscription and its history), `billing:write` (create, replace and cancel the organization subscription; implies billing read), `deliveries:read` (the Phase 9 event/delivery/attempt read routes only; independent of every other scope), `deliveries:retry` (`POST /v1/deliveries/{delivery_id}/retry` only; independent of `deliveries:read` and every other scope), `operations:read` (the two Phase 11 operational-observability routes only; independent of `deliveries:read` and every other scope), and `events:write` (`POST /v1/events`; default when no scopes are supplied). Unknown and wildcard values are ignored.
 
 ### Organization subscription lifecycle
 
@@ -187,6 +187,53 @@ A failed retry generation is itself a terminal failed Delivery and can be retrie
 in the chain. Retries do not reopen or re-send the original delivery, do not create a second Event, and do not
 change the ingestion idempotency key space. The 72-hour retry-key window is independent of the 90-day event
 retention; an expired key is discarded on next use and no longer replays.
+
+### Operational observability (`operations:read`)
+
+```text
+GET /v1/organizations/{org}/operations/overview?window=24h
+GET /v1/organizations/{org}/operations/endpoints?window=24h&limit=50
+```
+
+Both routes are read-only, require the independent `operations:read` scope, are scoped to the key's own
+organization and carry `Cache-Control: no-store`. They never write audit rows or any other state and never return
+payloads, receiver URLs, headers, secrets, envelopes or response-body snippets. Unknown or duplicated query
+parameters are `400 unknown_filter` / `invalid_filter`.
+
+`window` is closed: `1h`, `24h`, `7d` or `30d`, default `24h`. Every read is anchored to the current UTC second,
+and the window is half-open `[from, to)`. `overview` also reports an equally sized `previous_window` for comparison.
+`limit` on the endpoint route is 1–100, default 50.
+
+**Overview** (`overview` from persisted rows, no sampling):
+
+| Field | Source of truth and denominator |
+| --- | --- |
+| `events_accepted` | `count(*)` of `events` rows whose `received_at` falls in the window. Each ingested Event is counted once; a retry generation never adds an Event, and `events.destination_count` remains the generation-1 fan-out count. |
+| `deliveries.total` / `initial` / `retry` | Deliveries whose `created_at` falls in the window. `initial` is `generation = 1`; `retry` is `generation > 1` (Phase 10 generations). Status counts are the states observed at read time for that same cohort. |
+| `deliveries.terminal` / `success_rate` | `terminal = succeeded + failed + expired`; `success_rate = succeeded / terminal`, `null` when nothing is terminal. An expired delivery could not complete before event retention and counts as not successful. |
+| `previous_deliveries` | The same cohort fields for the immediately preceding window. |
+| `latency.attempts` / `avg_ms` / `p95_ms` | `delivery_attempts` rows with a recorded `duration_ms` whose `started_at` falls in the window. Percentiles are exact (`percentile_cont`) over at most the most recent 10,000 attempts; `sampled` is `true` when the window held more and `attempts` then reports 10,000. |
+| `retries` | Phase 10 generations (`generation > 1`) created in the window, with `succeeded`, `failed`, `expired`, `in_progress` and the same terminal-denominator `success_rate`. |
+
+**Endpoint health** lists only non-deleted endpoints with at least one delivery created in the window, ordered by
+failed count, then expired, then volume. Each row reports the window cohort, `success_rate`, `last_succeeded_at` /
+`last_failed_at` and the corresponding delivery IDs inside the window, plus `consecutive_failures`: the number of
+trailing `failed`/`expired` terminal deliveries before the most recent success, inspected over at most the 50 most
+recent terminal deliveries per endpoint. `last_succeeded_at` and `last_succeeded_delivery_id` are the most recent
+`succeeded` delivery; `last_failed_at` and `last_failed_delivery_id` are the most recent delivery in state `failed`
+specifically. An `expired` delivery moves `consecutive_failures` and the endpoint's `expired` count but does not
+set `last_failed_*`, because it never reached the receiver. `streak_capped` is `true` when all 50 inspected
+deliveries failed, so the real streak may be longer. `truncated` is `true` when more endpoints had activity than
+`limit` allowed.
+
+These are **observed delivery outcomes**, not endpoint availability: a quiet endpoint (no deliveries in the window)
+is omitted rather than reported healthy, and no probe, SLA or uptime percentage is implied. Aggregates cover only
+data still present in `deliveries` / `delivery_attempts`. The documented 90-day retention is a policy horizon; this
+repository still wires only the 72-hour idempotency sweep, so Events, Deliveries and Attempts are not purged
+automatically. If an operator purges or archives rows out of band, older windows make the aggregates incomplete or
+empty, and nothing reconstructs discarded rows. Only read-only indexes are used (`idx_events_org_received`,
+`idx_deliveries_org_created`, `idx_attempts_org_started`, `idx_deliveries_endpoint_state`); the read does not
+inspect payloads or secrets, and its scans are bounded by the requested window and the organization's endpoints.
 
 ### Destination policy (OD-4) and private endpoints
 
@@ -377,7 +424,7 @@ Production activation is **not approved**. Resolve and verify all of the followi
 - **API/ingestion:** management routes, API-key authentication and `POST /v1/events` ingestion exist; organization creation and API-key HTTP management remain absent. There is no rate limiting, WAF or public-internet hardening for either API. The fixed 1 MiB body cap is not a DoS defense; enforce request limits upstream.
 - **HA:** no approved production PostgreSQL/RabbitMQ HA topology, deployment manifests, failover drill or capacity benchmark. The shared queue has no tenant sharding/fairness guarantee.
 - **SSRF/egress:** the development HTTP executor enforces the OD-4 destination policy (HTTPS/443, explicit + classified address blocking, pinned dial, connected-remote verification, TLS verification, no proxy, no redirects, per-attempt revalidation). Network-level egress control and an egress allowlist are still required defense in depth for production; DNS preflight is advisory and delivery-time resolution uses the platform resolver.
-- **Observability:** process-local optional metrics exist, but no production scrape/alert topology, DLQ-growth alert or Recovery sweep-age alert is implemented. Management requests are logged without an access-audit pipeline beyond `audit_logs` writes.
+- **Observability:** process-local optional metrics and the read-only `operations:read` overview/endpoint-health API exist, but no production scrape/alert topology, dashboard, DLQ-growth alert or Recovery sweep-age alert is implemented. Operational aggregates describe retained delivery outcomes only; they are not availability probes and are not exported as Prometheus labels. Management requests are logged without an access-audit pipeline beyond `audit_logs` writes.
 - **Verification:** local PostgreSQL 18.7 integration, both approved RabbitMQ versions, generation/tag safety, duplicate/pre-T2 pointer handling, DLQ loss -> Recovery N+1, active-work shutdown and Linux race detection passed. Phase 6 added management authentication, lifecycle, ETag, ceiling, rotation, provider-I/O lock-release and subscription concurrency integration tests. Hosted runs `45826121102` (push) and `45826131425` (pull request) passed for merged SHA `1128f1042e3d951265aa7a8479b2d42c19a7975d`. Stage 8C defines nightly reusable CI and a pinned `govulncheck` v1.10.0 scan; their first hosted execution remains pending. Production failover/capacity drills are not covered by these development tests. Advisory lint still reports findings; lint cleanliness is not claimed.
 
 ## 9. CI and security automation

@@ -17,6 +17,7 @@ func TestParseScopes(t *testing.T) {
 		billingWrite bool
 		deliveries   bool
 		retry        bool
+		operations   bool
 		canon        []string
 	}{
 		{
@@ -122,6 +123,25 @@ func TestParseScopes(t *testing.T) {
 			retry:      true,
 			canon:      []string{ScopeDeliveriesRead, ScopeDeliveriesRetry},
 		},
+		{
+			name:       "operations read is independent",
+			input:      []string{ScopeOperationsRead},
+			operations: true,
+			canon:      []string{ScopeOperationsRead},
+		},
+		{
+			name:       "operations read and deliveries read are distinct",
+			input:      []string{ScopeOperationsRead, ScopeDeliveriesRead},
+			operations: true,
+			deliveries: true,
+			canon:      []string{ScopeDeliveriesRead, ScopeOperationsRead},
+		},
+		{
+			name:   "operations wildcard is not a scope",
+			input:  []string{"operations:*"},
+			events: true,
+			canon:  []string{ScopeEventsWrite},
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -149,6 +169,9 @@ func TestParseScopes(t *testing.T) {
 			}
 			if set.AllowsDeliveriesRetry() != testCase.retry {
 				t.Fatalf("AllowsDeliveriesRetry() = %v, want %v", set.AllowsDeliveriesRetry(), testCase.retry)
+			}
+			if set.AllowsOperationsRead() != testCase.operations {
+				t.Fatalf("AllowsOperationsRead() = %v, want %v", set.AllowsOperationsRead(), testCase.operations)
 			}
 			if got := set.CanonicalStrings(); !reflect.DeepEqual(got, testCase.canon) {
 				t.Fatalf("CanonicalStrings() = %v, want %v", got, testCase.canon)

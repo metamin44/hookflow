@@ -86,6 +86,9 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("DELETE "+organizationSubscriptionPath, h.cancelOrganizationSubscription)
 	h.mux.HandleFunc("GET "+organizationSubscriptionsPath, h.listOrganizationSubscriptions)
 
+	h.mux.HandleFunc("GET "+operationsOverviewPath, h.getOperationalOverview)
+	h.mux.HandleFunc("GET "+operationsEndpointsPath, h.getOperationalEndpointHealth)
+
 	h.mux.HandleFunc(endpointsPath, h.methodNotAllowed("GET, POST"))
 	h.mux.HandleFunc(endpointPath, h.methodNotAllowed("GET, PATCH, DELETE"))
 	h.mux.HandleFunc(rotatePath, h.methodNotAllowed("POST"))
@@ -93,6 +96,8 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc(subscriptionPath, h.methodNotAllowed("DELETE"))
 	h.mux.HandleFunc(organizationSubscriptionPath, h.methodNotAllowed("GET, PUT, DELETE"))
 	h.mux.HandleFunc(organizationSubscriptionsPath, h.methodNotAllowed("GET"))
+	h.mux.HandleFunc(operationsOverviewPath, h.methodNotAllowed("GET"))
+	h.mux.HandleFunc(operationsEndpointsPath, h.methodNotAllowed("GET"))
 	h.mux.HandleFunc(eventsPath, h.methodNotAllowed("GET, POST"))
 	h.mux.HandleFunc(eventPath, h.methodNotAllowed("GET"))
 	h.mux.HandleFunc(deliveriesPath, h.methodNotAllowed("GET"))

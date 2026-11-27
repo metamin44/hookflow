@@ -16,6 +16,9 @@ const (
 	ScopeDeliveriesRead = "deliveries:read"
 	// ScopeDeliveriesRetry grants manual creation of a new delivery generation.
 	ScopeDeliveriesRetry = "deliveries:retry"
+	// ScopeOperationsRead grants the derived operational overview and
+	// endpoint-health routes. It is independent of delivery history.
+	ScopeOperationsRead = "operations:read"
 )
 
 // Set is a parsed scope grant. Unknown scopes and wildcards are ignored; an
@@ -29,6 +32,7 @@ type Set struct {
 	billingWrite    bool
 	deliveriesRead  bool
 	deliveriesRetry bool
+	operationsRead  bool
 }
 
 // Parse interprets stored or operator-supplied scope values.
@@ -53,6 +57,8 @@ func Parse(values []string) Set {
 				set.deliveriesRead = true
 			case ScopeDeliveriesRetry:
 				set.deliveriesRetry = true
+			case ScopeOperationsRead:
+				set.operationsRead = true
 			}
 		}
 	}
@@ -65,7 +71,7 @@ func Parse(values []string) Set {
 func (s Set) any() bool {
 	return s.eventsWrite || s.endpointsRead || s.endpointsWrite ||
 		s.secretsRotate || s.billingRead || s.billingWrite || s.deliveriesRead ||
-		s.deliveriesRetry
+		s.deliveriesRetry || s.operationsRead
 }
 
 // AllowsEventsWrite reports the events:write capability.
@@ -94,9 +100,13 @@ func (s Set) AllowsDeliveriesRead() bool { return s.deliveriesRead }
 // independent of deliveries:read: retrying does not grant history visibility.
 func (s Set) AllowsDeliveriesRetry() bool { return s.deliveriesRetry }
 
+// AllowsOperationsRead reports the operations:read capability. It is
+// independent: no other scope implies it and it implies no other scope.
+func (s Set) AllowsOperationsRead() bool { return s.operationsRead }
+
 // CanonicalStrings renders the granted scopes in the approved storage form.
 func (s Set) CanonicalStrings() []string {
-	granted := make([]string, 0, 8)
+	granted := make([]string, 0, 9)
 	if s.eventsWrite {
 		granted = append(granted, ScopeEventsWrite)
 	}
@@ -120,6 +130,9 @@ func (s Set) CanonicalStrings() []string {
 	}
 	if s.deliveriesRetry {
 		granted = append(granted, ScopeDeliveriesRetry)
+	}
+	if s.operationsRead {
+		granted = append(granted, ScopeOperationsRead)
 	}
 	slices.Sort(granted)
 	return granted

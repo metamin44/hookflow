@@ -2141,6 +2141,12 @@ records the executed Phase 10 verification.
     explicit — creation time is accepted as an observable property of an id (U1 point 4), timestamps are the only
     ordering authority (U1 point 5), and an id is never an authorization token, a capability, a rate-limit key or a
     signing input (§3.1, overview §8).
+26. Phase 11 operational observability adds **no DDL**: the overview and endpoint-health reads aggregate
+    `events.received_at`, `deliveries.created_at`/`state`/`generation`, `delivery_attempts.started_at` and
+    `delivery_attempts.duration_ms` using `idx_events_org_received`, `idx_deliveries_org_created`,
+    `idx_deliveries_endpoint_state` and `idx_attempts_org_started`. `endpoints.last_success_at` /
+    `last_failure_at` remain unwritten; endpoint indicators are derived from the `deliveries` cohort in the
+    requested window, so no denormalized column or materialized view can drift from the delivery rows.
 
 ## 9. Schema-local open questions
 

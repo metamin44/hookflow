@@ -3661,3 +3661,69 @@ development PostgreSQL 18 container and the development RabbitMQ container:
   6 `gocognit`), none in Phase 10 code; lint cleanliness is not claimed.
 - No schema change outside unit 14, no dependency change, no `.env` or credential staged. At the time this record
   was written, no commit, push, pull request, hosted CI run, merge or production deployment had been performed.
+
+### 16.16 Phase 11 operational observability (2026-11-27)
+
+This is the Phase 11 implementation record. The milestone is one derived, read-only capability: an organization
+operational overview and an endpoint-health page, both computed from existing rows. **No migration, table, index,
+materialized view or persistent aggregation was added**, and no ingestion, delivery, retry, lease, outbox, worker or
+recovery code path changed. The read is mounted as `GET /v1/organizations/{organization_id}/operations/overview`
+and `GET /v1/organizations/{organization_id}/operations/endpoints` behind a new, independent `operations:read`
+scope (nine canonical scopes now); it implies no other scope and no other scope implies it.
+
+Semantics are explicit and identical in the API and runbook:
+
+- `window` is closed to `1h`, `24h`, `7d`, `30d` (default `24h`), anchored to the current UTC second and half-open
+  `[from, to)`; `overview` also reports the immediately preceding equal window.
+- `events_accepted` counts `events` rows by `received_at`, once per Event. Retry generations reuse their parent
+  Event, so a retry never presents as a new accepted Event, and `events.destination_count` keeps its Phase 10
+  meaning as the generation-1 fan-out count.
+- Delivery counts are the cohort whose `created_at` falls in the window, split into generation 1 (`initial`) and
+  generation > 1 (`retry`); states are the values observed at read time. `terminal = succeeded + failed + expired`
+  and `success_rate = succeeded / terminal`, `null` when nothing is terminal. Expired deliveries are terminal but
+  not successful, because the Event expired before completion.
+- Latency uses only attempts with a recorded `duration_ms` and `started_at` in the window. `avg_ms` and `p95_ms`
+  (`percentile_cont`) are exact over at most the 10,000 most recent attempts; `sampled = true` reports truncation and
+  `attempts` then caps at 10,000, so the read never sorts an unbounded window.
+- Endpoint health includes only live endpoints with at least one delivery created in the window, ordered by failed,
+  then expired, then volume. `last_succeeded_at` / `last_failed_at` and their delivery IDs are the most recent
+  `succeeded` and most recent `failed` deliveries inside the window; `expired` is tracked in counts and streaks but
+  never sets `last_failed_*` because it never reached the receiver. `consecutive_failures` counts trailing
+  `failed`/`expired` deliveries before the latest success over at most the 50 most recent terminal deliveries;
+  `streak_capped` marks a 50-failure streak whose true length may be larger. These indicators describe observed
+  outcomes, not availability: an endpoint with no deliveries is omitted, and no probe or uptime claim is made.
+- Every query is organization-scoped from the authenticated principal, uses the path organization only for the
+  tenant check, and returns only aggregates and identifiers — never payloads, receiver URLs, headers, secrets,
+  envelopes or response-body snippets. Reads write no audit rows.
+
+Index evidence: the reads use `idx_deliveries_org_created` for both windows, `idx_attempts_org_started` for the
+latency sample, `idx_events_org_received` for accepted Events and `idx_deliveries_endpoint_state` for per-endpoint
+cohorts; the 50-row streak probe is bounded per returned endpoint. Because the documented 90-day retention has no
+wired Events/Deliveries/Attempts purge today, the aggregates are exact over everything retained; if rows are purged
+out of band, older windows are incomplete and the API does not reconstruct them.
+
+New Prometheus counters were deliberately not added. The hand-written registry has no label support, so per-tenant
+or per-state series would require either a new instrumentation/store or fixed-name counters that duplicate these
+exact persisted aggregates; the existing process metrics and alerting contract are unchanged. Prometheus remains
+process-local liveness/throughput instrumentation; tenant operational visibility is the authenticated API.
+
+Verification on 2026-11-27 used the Windows working tree against the development PostgreSQL 18 container (schema
+version 14) and the development RabbitMQ container:
+
+- `gofmt -l` empty over all changed files, `go vet -tags integration ./...` and `go build ./...` clean.
+- Unit tests: `go test ./... -count=1` passed in every package except the pre-existing Windows CRLF-sensitive
+  `internal/platform/jcs` fixture comparisons, which pass on an LF checkout and in CI.
+- New coverage: unit tests for window/rate/denominator helpers and for the overview/endpoint query decoders;
+  integration tests for authorization, missing scopes, cross-tenant 404s, filters and methods, initial vs retry
+  cohorts, previous-window comparison, latency percentiles, endpoint ordering/last outcomes/streaks, half-open
+  boundaries, empty organizations, secret non-leakage and the 10,001-attempt sampling cap.
+- Full serial integration suite with `-p 1`: `test/integration` exited 0 in 54.100s; the five Phase 11 tests passed
+  as a group (1.389s), and the whole suite was rerun after one transient Worker queue timeout passed in isolation.
+- Linux CGO race in the pinned `golang:1.27.4` container: all packages except the CRLF-sensitive `jcs` package ran
+  with `-race` and exited 0, including the new `operations` package and the modified `management` and `apikey`
+  packages.
+- `golangci-lint` v2.15.0 reported the same 12 pre-existing advisory complexity findings (6 `cyclop`, 6 `gocognit`)
+  and no finding in Phase 11 code; the additional `gofmt` reports are the Windows CRLF checkout artifact. Lint
+  cleanliness is not claimed.
+- No schema change, no dependency change, and no `.env` or credential staged. This record was written before the
+  Phase 11 commit, push, pull request, hosted CI and merge, which are reported in the delivery record.

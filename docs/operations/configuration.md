@@ -280,6 +280,7 @@ Argon2id PHC verifier, so a lost token must be revoked and replaced. Send it as 
 | `billing:write` | `PUT`/`DELETE …/subscription`; implies `billing:read`. |
 | `deliveries:read` | The five Phase 9 read routes (`GET /v1/events`, `GET /v1/events/{event_id}`, `GET /v1/deliveries`, `GET /v1/deliveries/{delivery_id}`, `GET /v1/deliveries/{delivery_id}/attempts`) for the key's own organization. Independent of endpoint, ingestion and billing scopes; it grants no write. |
 | `deliveries:retry` | `POST /v1/deliveries/{delivery_id}/retry` only, for the key's own organization. Independent of `deliveries:read`; it grants no history visibility, no endpoint write and no ingestion. |
+| `operations:read` | `GET /v1/organizations/{organization_id}/operations/overview` and `GET /v1/organizations/{organization_id}/operations/endpoints` only, for the key's own organization. Independent of `deliveries:read` and every other scope; it grants no history, endpoint, billing, retry or ingestion access and returns only derived aggregates. |
 
 Unknown or wildcard scope strings are ignored. A key is valid until revoked or `expires_at`.
 

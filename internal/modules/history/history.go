@@ -39,12 +39,17 @@ func IsState(value string) bool {
 
 // Counts is the delivery summary of one event.
 type Counts struct {
-	Total     int `json:"total"`
-	Pending   int `json:"pending"`
-	Retrying  int `json:"retrying"`
-	Succeeded int `json:"succeeded"`
-	Failed    int `json:"failed"`
-	Expired   int `json:"expired"`
+	Total int `json:"total"`
+	// InitialTotal and RetryTotal split the same rows as Total into the
+	// generation-1 fan-out and manual retry generations. Total remains the sum
+	// of every delivery row, so Phase 9 responses stay additive-compatible.
+	InitialTotal int `json:"initial_total"`
+	RetryTotal   int `json:"retry_total"`
+	Pending      int `json:"pending"`
+	Retrying     int `json:"retrying"`
+	Succeeded    int `json:"succeeded"`
+	Failed       int `json:"failed"`
+	Expired      int `json:"expired"`
 }
 
 // EventSummary is one event list row. It never carries the payload.
@@ -75,6 +80,8 @@ type DeliverySummary struct {
 	State              string     `json:"state"`
 	AttemptCount       int        `json:"attempt_count"`
 	InProgress         bool       `json:"in_progress"`
+	Generation         int        `json:"generation"`
+	ParentDeliveryID   *string    `json:"parent_delivery_id"`
 	CreatedAt          time.Time  `json:"created_at"`
 	NextAttemptAt      *time.Time `json:"next_attempt_at"`
 	LastAttemptAt      *time.Time `json:"last_attempt_at"`

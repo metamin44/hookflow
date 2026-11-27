@@ -93,6 +93,25 @@ func List(ctx context.Context, q Querier, organizationID, endpointID string) ([]
 	return records, nil
 }
 
+// ActiveMatchingID returns the current active rule for one exact event type,
+// or nil when the endpoint no longer matches. It is the provenance pointer for
+// a manually created delivery generation.
+func ActiveMatchingID(ctx context.Context, q Querier, organizationID, endpointID, eventType string) (*string, error) {
+	const query = `SELECT id::text
+		FROM endpoint_subscriptions
+		WHERE organization_id = $1::uuid AND endpoint_id = $2::uuid
+		  AND event_type = $3 AND is_active`
+	var id string
+	err := q.QueryRow(ctx, query, organizationID, endpointID, eventType).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read active subscription: %w", err)
+	}
+	return &id, nil
+}
+
 // CreateOrReactivate inserts an active rule or reactivates an inactive one.
 // The conflict path takes the row lock. created is false on reactivation.
 func CreateOrReactivate(ctx context.Context, q Querier, record Record) (Record, bool, error) {

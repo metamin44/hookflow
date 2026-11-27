@@ -236,6 +236,7 @@ func (f *fixture) cleanupRows(t *testing.T) {
 	defer cancel()
 	statements := []string{
 		`DELETE FROM delivery_attempts WHERE organization_id = $1::uuid`,
+		`DELETE FROM delivery_retry_requests WHERE organization_id = $1::uuid`,
 		`DELETE FROM outbox_messages WHERE organization_id = $1::uuid`,
 		`DELETE FROM deliveries WHERE organization_id = $1::uuid`,
 		`DELETE FROM events WHERE organization_id = $1::uuid`,

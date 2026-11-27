@@ -1,11 +1,13 @@
 package outbox
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/metamin44/hookflow/internal/platform/messaging"
 )
@@ -36,16 +38,47 @@ VALUES ($1::uuid, $2::uuid, $3::uuid, 1, 'delivery.dispatch', $4, $5::jsonb, $6:
 
 // AppendAccepted queues the initial delivery.dispatch row for one new Delivery.
 func AppendAccepted(batch *pgx.Batch, accepted Accepted) error {
+	args, err := acceptedArgs(accepted)
+	if err != nil {
+		return err
+	}
+	batch.Queue(insertAcceptedSQL, args...)
+	return nil
+}
+
+// Execer is satisfied by pgx.Tx.
+type Execer interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
+// InsertAccepted writes the same initial delivery.dispatch row directly inside
+// the caller's transaction. It is used by manual retry, which is not a batch
+// ingestion path.
+func InsertAccepted(ctx context.Context, q Execer, accepted Accepted) error {
+	args, err := acceptedArgs(accepted)
+	if err != nil {
+		return err
+	}
+	tag, err := q.Exec(ctx, insertAcceptedSQL, args...)
+	if err != nil {
+		return fmt.Errorf("insert initial outbox row: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return errors.New("insert initial outbox row did not write exactly one row")
+	}
+	return nil
+}
+
+func acceptedArgs(accepted Accepted) ([]any, error) {
 	if accepted.AvailableAt.IsZero() {
-		return errors.New("initial outbox available time is required")
+		return nil, errors.New("initial outbox available time is required")
 	}
 	payload, err := messaging.BuildOutboxPayload(accepted.ID, accepted.OrganizationID, accepted.DeliveryID, 1)
 	if err != nil {
-		return fmt.Errorf("build initial outbox payload: %w", err)
+		return nil, fmt.Errorf("build initial outbox payload: %w", err)
 	}
-	batch.Queue(insertAcceptedSQL,
+	return []any{
 		accepted.ID, accepted.OrganizationID, accepted.DeliveryID,
 		messaging.DispatchRoutingKey, payload, initialHeaders(), accepted.AvailableAt,
-	)
-	return nil
+	}, nil
 }

@@ -192,7 +192,7 @@ jobs:
           PY
       - name: Prove down and up migrations
         run: |
-          go run ./cmd/migrate down 13
+          go run ./cmd/migrate down 14
           go run ./cmd/migrate up
           go run ./cmd/migrate version
 

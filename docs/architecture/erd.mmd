@@ -1,4 +1,7 @@
-%% HookFlow V1 - Entity Relationship Diagram (canonical 13-table inventory; revision 16 design plus the 2026-11-22 approval alignment, overview §12.16, the 2026-11-23 F3/F8 decisions, overview §12.17, and the 2026-11-23 Recovery expiry-precedence decision, overview §12.18; documentation revision 17 adds no entity or attribute change; revision 18 records Phase 6 with no entity or attribute change)
+%% HookFlow V1 - Entity Relationship Diagram (canonical 14-table inventory as of revision 22 / Phase 10;
+%% revision 16 design plus the 2026-11-22 approval alignment, overview §12.16, the 2026-11-23 F3/F8 decisions,
+%% overview §12.17, the 2026-11-23 Recovery expiry-precedence decision, overview §12.18, and Phase 10's manual
+%% delivery retry generations, overview §16.15; revisions 17-21 changed comments only)
 %% Render target: Mermaid erDiagram (GitHub, mermaid-cli, VS Code preview).
 %% Companion: database-schema.md holds the full column, constraint and index detail.
 %%
@@ -306,6 +309,19 @@
 %%   (schema version 13); implementation status is in overview §16 and database-schema.md §7.
 %%   Mermaid rendering was still NOT verified, as in every earlier round.
 %%
+%% Revision 22 (Phase 10, 2026-11-27): manual delivery retry generations add migration unit 14.
+%%   DATA MODEL CHANGE, unlike revisions 8-21:
+%%     deliveries gains generation (NOT NULL DEFAULT 1, CHECK >= 1) and parent_delivery_id (nullable,
+%%       self composite FK to deliveries (organization_id, id) ON DELETE RESTRICT). Generation 1 is the
+%%       accept-time row with no parent; each retry allocates MAX(generation)+1 under the approved
+%%       organizations -> endpoints -> source-delivery lock order and links to its immediate source.
+%%       The old two-column UNIQUE (event_id, endpoint_id) becomes UNIQUE (event_id, endpoint_id, generation).
+%%     14th entity delivery_retry_requests: the caller-facing 72-hour Idempotency-Key claim for
+%%       POST /v1/deliveries/{delivery_id}/retry. It points at the source and the new generation, never
+%%       at an Event; ingestion idempotency (idempotency_records / U44) is untouched.
+%%   Counts: 14 entity blocks, 21 relationship lines, 157 + 10 attribute lines (2 on deliveries, 8 on the
+%%   new table). Mermaid rendering is not verified here; the file is checked structurally.
+%%
 %% Reading the attribute lines:
 %%   type name [PK|FK|UK] "notes"
 %%   NOT NULL and CHECK detail lives in database-schema.md section 4; the note here is a pointer.
@@ -338,6 +354,10 @@ erDiagram
     deliveries ||--o{ outbox_messages : "agreed one to many, not one to one"
     organizations ||--o{ idempotency_records : "approved with U4, key scoped to org"
     events |o--o{ idempotency_records : "approved with U4, nullable event link"
+    organizations ||--o{ delivery_retry_requests : "Phase 10, retry key scoped to org"
+    deliveries ||--o{ delivery_retry_requests : "Phase 10, retry source"
+    deliveries ||--o{ delivery_retry_requests : "Phase 10, retry new generation"
+    deliveries |o--o{ deliveries : "Phase 10, retry lineage parent"
     users |o--o{ api_keys : "U12 approved by A10, creator; F3-A single-column SET NULL"
     api_keys |o--o{ events : "U12 approved by A10, provenance; F3-B composite SET NULL"
     endpoint_subscriptions |o--o{ deliveries : "U12 approved by A10, rule that matched; F3-C composite SET NULL"
@@ -458,6 +478,8 @@ erDiagram
         timestamptz completed_at "not null only in terminal state"
         uuid dispatch_lease_token "nullable, C-2 worker fence, not an entity id, A1"
         timestamptz dispatch_lease_expires_at "nullable, paired with the token, no default, A1"
+        integer generation "not null default 1, CHECK >= 1, 1 at accept, MAX+1 per manual retry, Phase 10"
+        uuid parent_delivery_id "nullable only for generation 1, self composite FK to deliveries org+id RESTRICT, Phase 10"
     }
 
     delivery_attempts {
@@ -536,4 +558,15 @@ erDiagram
         uuid event_id "nullable only in flight, never NULL committed - trg_idem_linked, composite FK to events org id CASCADE, U44 approved"
         timestamptz created_at "not null, start of the 72 hour window"
         timestamptz expires_at "not null after created_at, key reusable once passed regardless of cleanup, swept by worker, U4 and U43 approved"
+    }
+
+    delivery_retry_requests {
+        uuid id PK
+        uuid organization_id "FK not null, cascade, the scope of the retry key"
+        text idempotency_key "not null, 1-200, UNIQUE with organization_id"
+        bytea request_hash "not null, exactly 32 bytes, SHA-256 of hookflow.delivery.retry.v1 prefix plus source delivery id"
+        uuid source_delivery_id "not null, composite FK to deliveries org id CASCADE, terminal failed source"
+        uuid new_delivery_id "not null, composite FK to deliveries org id CASCADE, distinct from source"
+        timestamptz created_at "not null, start of the 72 hour window"
+        timestamptz expires_at "not null after created_at, key reusable once passed, reclaimed lazily"
     }

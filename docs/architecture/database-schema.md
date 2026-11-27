@@ -1,15 +1,22 @@
-# HookFlow — Database Schema (V1, 13 tables)
+# HookFlow — Database Schema (V1, 14 tables)
 
-> **Status (documentation revision 18):** design reference for the approved 13-table schema, with the
-> implementation status recorded in [overview.md §16](./overview.md).
-> Revisions 2–16 remain the design and approval history; the later owner approvals are in overview §12.16
-> (A1–A10, B1–B6), §12.17 (F3-A/F3-B/F3-C/F8) and §12.18 (Recovery expiry precedence, 2026-11-23).
-> **The migration units below are no longer merely illustrative:** the 13 paired up/down migrations exist in
-> `db/migrations/`, were applied to PostgreSQL 18.7 (schema version 13), and match the §4 text, including
-> unit 13's `idem_assert_linked()` function and deferred `trg_idem_linked` trigger. **The migration files,
-> not this document, are the DDL artifacts of record.** `db/queries/` is still empty and no generated query
-> layer exists. The DDL excerpts below remain the design explanation of those files.
+> **Status (documentation revision 22, Phase 10):** design reference for the implemented 14-table schema
+> at migration version **14**, with the implementation status recorded in
+> [overview.md §16](./overview.md). Revisions 2–16 remain the design and approval history; the later owner
+> approvals are in overview §12.16 (A1–A10, B1–B6), §12.17 (F3-A/F3-B/F3-C/F8) and §12.18 (Recovery expiry
+> precedence, 2026-11-23). Phase 10 (`delivery_retry_requests`, `deliveries.generation`,
+> `deliveries.parent_delivery_id`) is recorded in Revision 22 below.
+> **The migration units below are no longer merely illustrative:** the **14** paired up/down migrations exist in
+> `db/migrations/`, were applied to PostgreSQL 18.7 (schema version **14**), and match the §4 text, including
+> unit 13's `idem_assert_linked()` function and deferred `trg_idem_linked` trigger and unit 14's retry-generation
+> lineage. **The migration files, not this document, are the DDL artifacts of record.** `db/queries/` is still
+> empty and no generated query layer exists. The DDL excerpts below remain the design explanation of those files.
 > Diagram: [erd.mmd](./erd.mmd).
+> **Phase 10 execution note (2026-11-27, Revision 22):** manual delivery retry uses the existing Event,
+> Delivery, Attempts, Outbox and audit machinery plus unit 14. The original fan-out uniqueness rule becomes
+> `(event_id, endpoint_id, generation)`; existing rows are generation 1 with no parent, and
+> `events.destination_count` keeps its generation-1 meaning. No Phase 10 change touches ingestion idempotency
+> (`idempotency_records` / U44) or any unrelated table. Evidence is in overview §16.15.
 > **Bundle 1 execution note (2026-11-24, no new schema revision):** Publisher/Worker/Recovery runtime now uses
 > this existing schema. PostgreSQL remains 18.7, version 13, dirty=false; all 26 migration-file hashes are unchanged.
 > No new table, column, index, constraint, trigger or ERD relationship was required. Local runtime test evidence
@@ -247,6 +254,15 @@
 > is organizations -> endpoints -> endpoint_subscriptions. (3) `endpoints.last_success_at` / `last_failure_at` remain
 > reserved columns with no writer. The D6/U25 development runtime (file KEK, `hfse1.` envelopes, signing) likewise
 > required no schema change.
+>
+> **Revision 22 (2026-11-27, Phase 10) adds manual delivery retry generations and grows the inventory to 14
+> tables.** It is the first schema change since Revision 18. `deliveries` gains `generation` and
+> `parent_delivery_id`, the fan-out unique key becomes `(event_id, endpoint_id, generation)`, and the new
+> `delivery_retry_requests` table owns the caller-facing 72-hour retry idempotency key. Existing rows become
+> generation 1 with a NULL parent. `events.destination_count` is unchanged and continues to count generation-1
+> deliveries only; retry generations are excluded. Ingestion idempotency (`idempotency_records`, U44) and every
+> other table are untouched. Revision 22 approves no new design decision: it records the Owner-authorized Phase 10
+> implementation described in overview §16.15.
 
 ---
 
@@ -254,7 +270,7 @@
 
 | Agreed decision | Schema artifact |
 | --- | --- |
-| PostgreSQL, UUID primary keys | `id uuid PRIMARY KEY` on all 13 tables. The generator question is **closed**: the owner approved **U1** in revision 16 (recorded as §11 item 34, after revision 15 documented the strategy under a premature approval claim) — the values are **UUIDv7** and are produced by the **application before the `INSERT`**, so no `id` column has, or may have, a `DEFAULT`. Storage is unaffected by that choice: the column type stays `uuid`, 16 bytes with the RFC 4122 text form, identical for v4 and v7 values, so application-generated UUIDv7 needs no type, length, index or constraint change. The PostgreSQL target is **18** (A6, 2026-11-22); the exact patch and tooling are verified before any migration executes, and native `uuidv7()` is *not* used for id generation |
+| PostgreSQL, UUID primary keys | `id uuid PRIMARY KEY` on all 14 tables. The generator question is **closed**: the owner approved **U1** in revision 16 (recorded as §11 item 34, after revision 15 documented the strategy under a premature approval claim) — the values are **UUIDv7** and are produced by the **application before the `INSERT`**, so no `id` column has, or may have, a `DEFAULT`. Storage is unaffected by that choice: the column type stays `uuid`, 16 bytes with the RFC 4122 text form, identical for v4 and v7 values, so application-generated UUIDv7 needs no type, length, index or constraint change. The PostgreSQL target is **18** (A6, 2026-11-22); the exact patch and tooling are verified before any migration executes, and native `uuidv7()` is *not* used for id generation |
 | Every entity identifier is a UUIDv7 value generated in the application layer, with no database-generated defaults, and one strategy shared by `api`, `worker` and `outbox-publisher` (U1 approved, revision 16) | **no DDL artifact** — this is where values come from, not what the schema holds. §2 states it as a convention, §4 repeats it on every `id` row, and consequence 24 records the `NOT NULL` side effect. Publicly exposed ids (`events.id` in the `202` body, `deliveries.id` as `X-HookFlow-Delivery-Id`) are covered; **ids authorize nothing** — access is §3.1's same-organization invariant plus API scopes |
 | `Idempotency-Key` required and unique per organization (U4 approved) | the header stays **required at the API boundary**, but the key is stored and uniquified in `idempotency_records`: `uq_idem_org_key UNIQUE (organization_id, idempotency_key)` (§4.13). `events.idempotency_key` is **removed** |
 | 72-hour retention of idempotency records; key reusable after expiry; expiry never deletes event history (U4 approved) | `expires_at = created_at + interval '72 hours'` with `chk_idem_window`, cleanup served by `idx_idem_expiry`; because the FK points *from* the record *to* `events`, deleting a record cannot touch the event or its deliveries (§4.13, §6) |
@@ -427,9 +443,11 @@ Two different uniqueness rules, deliberately not merged:
   because the two lifetimes differ: a key expires after **72 hours** and becomes reusable, while the
   event and its delivery history are retained for **90 days**. One column cannot serve both windows, and
   a key-only delete would have meant deleting the event (§4.13).
-* `uq_deliveries_event_endpoint UNIQUE (event_id, endpoint_id)` — engine-facing: at most one
-  delivery per (event, destination) pair, which is what makes eager fan-out safe to retry if the
-  transaction is replayed.
+* `uq_deliveries_event_endpoint_generation UNIQUE (event_id, endpoint_id, generation)` —
+  engine-facing: at most one delivery per (event, destination, generation), which is what makes eager
+  fan-out safe to retry if the transaction is replayed, and what gives each manual retry its own row.
+  The pre-Phase-10 two-column form `uq_deliveries_event_endpoint` was replaced by unit 14; generation 1
+  is the accept-time row, and generation > 1 is a retry (§4.8).
 
 `endpoint_subscriptions` is deduped by `UNIQUE (endpoint_id, event_type)`; `delivery_attempts` by
 `UNIQUE (delivery_id, attempt_number)`.
@@ -853,8 +871,9 @@ literal", and `1e-400` (one digit, → `0`) and `9007199254740992.5` (→ an uns
 digit count can see. **Nothing in those decisions changes a rule in this section:** U46's five rules above are the
 revision-9 text, and G1 refuses a value rule 1 already refuses rather than adding a new prohibition.
 
-**Phase 7 implementation note (2026-11-25).** Ingestion and fan-out are implemented against this unchanged
-schema: version 13, dirty=false, no migration file, column, index, constraint or relationship changed. The
+**Phase 7 implementation note (2026-11-25; historical — schema since moved to version 14 in Phase 10).**
+Ingestion and fan-out were implemented against the then-current schema: version 13, dirty=false, no
+migration file, column, index, constraint or relationship changed by Phase 7 itself. The
 request body is read with a `1 MiB + 1` limit and rejected with `400 payload_too_large` when the extra byte
 exists; only the validated, parsed document reaches this `jsonb` column, and no raw request body is retained
 anywhere. PostgreSQL `jsonb` normalizes whitespace and object member order, so the delivered body is the parsed
@@ -862,7 +881,7 @@ value; the fingerprint is computed from RFC 8785 JCS of the validated document, 
 (§4.13.1). `events.received_at` is the single source of the `202` timestamp, and 90-day event retention and
 72-hour idempotency retention are unchanged (§6).
 
-### 4.8 `deliveries` — one row per (event, destination); the destination snapshot lives here
+### 4.8 `deliveries` — one row per (event, destination) generation; the destination snapshot lives here
 
 | Column | Type | | Description |
 | --- | --- | --- | --- |
@@ -871,11 +890,11 @@ value; the fingerprint is computed from RFC 8785 JCS of the validated document, 
 | `event_id` | `uuid` | NN | composite-FK'd to `events (organization_id, id)` |
 | `endpoint_id` | `uuid` | NN | composite-FK'd to `endpoints (organization_id, id)` |
 | `endpoint_subscription_id` | `uuid` | NULL, composite FK → `endpoint_subscriptions (organization_id, id)` `SET NULL (endpoint_subscription_id)` | provenance pointer to the rule that matched; nullable and may be cleared when the subscription is deleted, which leaves the delivery snapshot and the delivery itself untouched (F3-C, U12) |
-| `url` | `text` | NN | **snapshot column** — destination URL exactly as it stood when the event was accepted |
-| `http_headers` | `jsonb` | NN, default `{}` | **snapshot column** — immutable static headers as accepted; new snapshots omit sensitive/unsupported endpoint headers and the Worker filters recognized legacy credential headers at send time |
-| `secret_encrypted` | `text` | NN | **snapshot column** — encrypted signing secret as accepted (§4.5.1; copy-to-delivery approved by A8). It is immutable after acceptance and **must not be rewrapped** under the Owner-approved D6-D; the D6/U25 envelope/custody architecture is approved and implemented in development, while production custody is absent |
+| `url` | `text` | NN | **snapshot column** — destination URL exactly as it stood when this generation was created (accept for generation 1, retry time for later generations) |
+| `http_headers` | `jsonb` | NN, default `{}` | **snapshot column** — immutable static headers as accepted (generation 1) or copied from the current eligible endpoint under the same `SafeHeaders` rules (retry generations); new snapshots omit sensitive/unsupported endpoint headers and the Worker filters recognized legacy credential headers at send time |
+| `secret_encrypted` | `text` | NN | **snapshot column** — encrypted signing secret copied from the endpoint (or its immutable generation-1 snapshot) when this generation was created (§4.5.1; copy-to-delivery approved by A8). It is immutable after creation and **must not be rewrapped** under the Owner-approved D6-D; the D6/U25 envelope/custody architecture is approved and implemented in development, while production custody is absent |
 | `state` | `text` | NN, default `pending`, CHK `pending`/`retrying`/`succeeded`/`failed`/`expired` | |
-| `dispatch_seq` | `integer` | NN, CHK ≥ 1, no default | generation of the dispatch intent; initial value 1, incremented per retry (A2) |
+| `dispatch_seq` | `integer` | NN, CHK ≥ 1, no default | dispatch-intent sequence **within this Delivery row**; initial value 1 and incremented in place on a retry dispatch (A2). It is not the cross-delivery `generation` |
 | `attempt_count` | `integer` | NN, default `0`, CHK ≥ 0 | single authoritative read for the retry scheduler |
 | `next_attempt_at` | `timestamptz` | NULL | business due-time authority; NULL once terminal. `outbox_messages.available_at` is a derived relay gate (U8 approved; A3) |
 | `last_attempt_at` | `timestamptz` | NULL | |
@@ -886,30 +905,42 @@ value; the fingerprint is computed from RFC 8785 JCS of the validated document, 
 | `completed_at` | `timestamptz` | NULL | |
 | `dispatch_lease_token` | `uuid` | NULL | C-2 worker fencing token; not an entity id (A1) |
 | `dispatch_lease_expires_at` | `timestamptz` | NULL | C-2 lease expiry; paired with the token, no default (A1) |
+| `generation` | `integer` | NN, default `1`, CHK `chk_deliveries_generation` ≥ 1 | monotonic generation per `(event_id, endpoint_id)`; generation 1 is the eager-fan-out row, and every manual retry creates exactly one new row with the next value |
+| `parent_delivery_id` | `uuid` | NULL, CHK `chk_deliveries_lineage` | immediate source generation; NULL exactly when `generation = 1`, non-NULL for every retry generation. Composite-FK'd to `deliveries (organization_id, id)` with `ON DELETE RESTRICT` |
 
 Constraints:
-`uq_deliveries_event_endpoint UNIQUE (event_id, endpoint_id)` — fan-out idempotency,
+`uq_deliveries_event_endpoint_generation UNIQUE (event_id, endpoint_id, generation)` — fan-out idempotency
+for generation 1 and lineage uniqueness for retries; the former two-column `uq_deliveries_event_endpoint`
+constraint was dropped by unit 14,
 `fk_deliveries_org_event` / `fk_deliveries_org_endpoint` — the same-organization rule (§3.1),
+`fk_deliveries_org_parent FOREIGN KEY (organization_id, parent_delivery_id) REFERENCES deliveries
+(organization_id, id) ON DELETE RESTRICT` — a parent cannot be deleted while a retry generation references it,
 `fk_deliveries_org_endpoint_subscription FOREIGN KEY (organization_id, endpoint_subscription_id)
 REFERENCES endpoint_subscriptions (organization_id, id) ON DELETE SET NULL (endpoint_subscription_id)` —
 the nullable provenance pointer is cleared when its rule is deleted, while `organization_id` and the
 snapshot payload columns are preserved (F3-C),
-`uq_deliveries_org_id UNIQUE (organization_id, id)` — target for `delivery_attempts` and `outbox_messages`,
+`uq_deliveries_org_id UNIQUE (organization_id, id)` — target for `delivery_attempts`, `outbox_messages`,
+`delivery_retry_requests` and the lineage self-FK,
 `chk_deliveries_completed CHECK ((state IN ('succeeded','failed','expired')) = (completed_at IS NOT NULL))`,
 `chk_deliveries_worker_lease CHECK ((dispatch_lease_token IS NULL) = (dispatch_lease_expires_at IS NULL))`,
 `chk_deliveries_scheduling CHECK ((state IN ('pending','retrying')) = (next_attempt_at IS NOT NULL))` —
 only retryable states carry a due time. Both halves are needed: the naive
-`state = 'pending' = (next_attempt_at IS NULL)` form rejects every completed row.
+`state = 'pending' = (next_attempt_at IS NULL)` form rejects every completed row,
+`chk_deliveries_generation CHECK (generation >= 1)`,
+`chk_deliveries_lineage CHECK ((generation = 1 AND parent_delivery_id IS NULL) OR
+(generation > 1 AND parent_delivery_id IS NOT NULL))` — a lineage row cannot silently claim the wrong parent
+shape, and appending a retry never rewrites the source.
 
 Indexes: `idx_deliveries_due ON deliveries (next_attempt_at) WHERE state IN ('pending','retrying')` —
 the sweep reads only this partial index regardless of how many events exist,
 `idx_deliveries_org_created ON deliveries (organization_id, created_at DESC)`,
 `idx_deliveries_event ON deliveries (event_id)`,
-`idx_deliveries_endpoint_state ON deliveries (endpoint_id, state, created_at DESC)`.
+`idx_deliveries_endpoint_state ON deliveries (endpoint_id, state, created_at DESC)`,
+`idx_deliveries_parent ON deliveries (parent_delivery_id) WHERE parent_delivery_id IS NOT NULL`.
 
 **Snapshot ownership (U33 approved).** `url`, `http_headers` and `secret_encrypted` are the
-destination snapshot payload, immutable after acceptance, and they exist in exactly one place: this
-table. `endpoint_subscription_id` is a nullable provenance pointer stored beside them; it may be set
+destination snapshot payload, immutable after this generation is created, and they exist in exactly one place:
+this table. `endpoint_subscription_id` is a nullable provenance pointer stored beside them; it may be set
 to NULL when its subscription row is deleted (F3-C). Clearing the pointer does not change the snapshot
 payload and does not cancel the delivery. `events` holds no destination collection, so there is nothing to keep in sync and no
 possibility of a delivery disagreeing with its parent event about where it was supposed to go. The
@@ -919,7 +950,18 @@ delivery actually use?" question is answered by the row itself. The trade-off to
 that listing destinations for one event is now a multi-row read instead of one JSONB value, and that
 an event matching zero live endpoints produces zero rows. With `events.status` removed (U36 approved),
 `events.destination_count = 0` is the *only* record that nothing matched — which is precisely why the
-counter is kept while the status column is not.
+counter is kept while the status column is not. Retry generations read the **current** endpoint and take
+their own snapshot; they never copy or mutate an earlier Delivery snapshot.
+
+**Retry lineage (Phase 10).** A manual retry locks the organization, current endpoint and source delivery in
+that order, requires the source to be a terminal `failed` generation with no live worker lease and an
+unexpired Event, allocates `MAX(generation) + 1` for the same `(event_id, endpoint_id)` transactionally, and
+inserts one new pending row with `dispatch_seq = 1`, `attempt_count = 0`, its own lease columns absent, a fresh
+snapshot of the current eligible endpoint and subscription provenance (or NULL), plus its own Outbox row and
+audit record. It never updates the source row, its Attempts, the Event or `destination_count`. A failed retry
+generation may itself be retried and becomes the parent of the next generation; the chain is visible through
+`parent_delivery_id` and ordered by `generation`. The per-lineage `delivery_retry_requests` key is described in
+§4.14 and never reuses ingestion idempotency.
 
 ### 4.9 `delivery_attempts` — one row per completed HTTP call (append-only; U18)
 
@@ -1567,6 +1609,60 @@ is the same place U46 and U41's non-negotiables already live.
 | **Parse order** (§15.3 steps 1–8) approved as normative | §4.7, §4.13.1, §4.13.5, overview §11 item 29, §5.1 there | **none.** Steps 1–7 stay before `BEGIN` and step 8 is the unchanged claim-first transaction (U4, U42, U43, U44, U45); `maxBodySize` remains **U17**'s unset value |
 | **Conformance gate** approved as a merge requirement | §4.13.5 requirement 4 + acceptance bar, overview §11 item 32, §10 there | **none.** It is test machinery. At revision 14, only the overview §15.2.2 vectors had been executed, on go1.27.3; the Appendix I external corpus, V8 cross-checks, sustained fuzzing, go1.27.4 and hosted-CI execution were pending. **Phase 7 update (2026-11-25):** the RFC-vector suite, independent Node.js/V8 comparison and 60-second bounded fuzzing passed locally and in the dedicated hosted `jcs-conformance` job. See the Phase 7 conformance correction in §4.13.5 and overview §16.11. This is bounded conformance evidence, not exhaustive RFC proof or Production Readiness. |
 
+### 4.14 `delivery_retry_requests` — key → created retry generation (Phase 10)
+
+Caller-facing idempotency for `POST /v1/deliveries/{delivery_id}/retry`. It is a separate table on
+purpose: ingestion idempotency (§4.13) owns an *Event*, while a retry key owns a **source/new Delivery
+pair** and its 72-hour window is independent of event retention. Reusing `idempotency_records` would
+have forced a second meaning into its `event_id` and its `trg_idem_linked` invariant, so U4/U44 stay
+untouched.
+
+| Column | Type | | Description |
+| --- | --- | --- | --- |
+| `id` | `uuid` | PK, NN | app-generated **UUIDv7**, no `DEFAULT`; claim identity |
+| `organization_id` | `uuid` | NN, FK → `organizations` CASCADE | tenant scope of the key |
+| `idempotency_key` | `text` | NN, CHK 1–200 | caller header value, same length rule as ingestion |
+| `request_hash` | `bytea` | NN, CHK exactly 32 bytes | `sha256("hookflow.delivery.retry.v1:" + source_delivery_id)`; because the retry body is empty, the source id **is** the request content — there is no URL/header/secret material in the fingerprint |
+| `source_delivery_id` | `uuid` | NN, org-scoped FK → `deliveries` CASCADE | the terminal failed Delivery the caller retried |
+| `new_delivery_id` | `uuid` | NN, org-scoped FK → `deliveries` CASCADE | the generation this key created; replay returns its view |
+| `created_at` | `timestamptz` | NN, default `now()` | start of the 72-hour window |
+| `expires_at` | `timestamptz` | NN, CHK `> created_at` | written by the application as `created_at + 72h`; same policy value as ingestion but a separate constant and lifetime |
+
+Constraints and indexes:
+
+| Object | Definition | Justification |
+| --- | --- | --- |
+| `uq_retry_org_key` | `UNIQUE (organization_id, idempotency_key)` | serialization point for concurrent same-key retries; the organization row is already locked first (§4.8), so the unique violation is a defence-in-depth backstop |
+| `chk_retry_key_len` | `CHECK (char_length(idempotency_key) BETWEEN 1 AND 200)` | rejects an empty or unbounded key at the store boundary |
+| `chk_retry_hash_len` | `CHECK (octet_length(request_hash) = 32)` | SHA-256 digest, no hex-column ambiguity |
+| `chk_retry_expiry` | `CHECK (expires_at > created_at)` | a claim can never be born expired |
+| `chk_retry_distinct` | `CHECK (source_delivery_id <> new_delivery_id)` | a retry always creates a new identity; never aliases the source |
+| `fk_retry_org_source` / `fk_retry_org_new` | `FOREIGN KEY (organization_id, <col>) REFERENCES deliveries (organization_id, id) ON DELETE CASCADE` | tenant integrity for both ends; deletion of a delivery removes the claim rather than leaving dangling history |
+| `idx_retry_expiry` | `(expires_at)` | expiry sweep and expired-claim lookup |
+| `idx_retry_source` / `idx_retry_new` | `(source_delivery_id)` / `(new_delivery_id)` | cascade lookups and reverse traceability without scanning |
+
+Semantics that follow from the schema and the transaction, not from prose:
+
+* **Replay is read-only.** A live claim whose source and hash both match returns the existing
+  `new_delivery_id` projection (`200`, `HookFlow-Idempotent-Replay: true`) and writes nothing —
+  no Delivery, no Outbox row, no audit entry.
+* **Mismatch is 409.** A live claim claimed by a different source (the only way to have a different
+  hash) is `409 idempotency_key_conflict`. Same key on the *same* source is a replay, not a conflict.
+* **Expired means reusable.** A claim with `expires_at <= now` is deleted inside the retry transaction
+  and the key is then claimed afresh. The old row is never mutated, so no partially updated claim is
+  ever visible.
+* **No orphan on a losing duplicate.** The new Delivery, its initial Outbox row, the audit row and the
+  claim live in one transaction. A unique violation rolls the whole transaction back, so a losing
+  concurrent attempt leaves no generation behind.
+* **The source is never touched.** The claim only *points* at the source; retry insert and audit add a
+  new generation and never update `deliveries` for the source (§4.8), so its Attempts, lease, state and
+  `events.destination_count` are unchanged.
+
+`expires_at` rows are bounded by the 72-hour window, so the table stays small; no scheduler task is
+defined for it (expired claims are reclaimed lazily by the next request using that key). This is a
+Phase 10 decision and does not reopen U43's ingestion sweep, which is a separate mechanism over a
+separate table.
+
 ## 5. Fan-out and message lifecycle
 
 The transaction boundary below belongs to an **application service, not to a module** (U39 approved,
@@ -1682,9 +1778,11 @@ U36 approved removing `events.status` entirely: acceptance is expressed by the r
 is no `discarded` state — an event that matched nothing is an ordinary accepted event with
 `destination_count = 0`. Consequently `deliveries.state` is the only processing-state machine in the
 system, and overall event progress is an aggregate over it (`idx_deliveries_event`). The equality
-`events.destination_count = count(deliveries WHERE event_id = ...)` is now a stated invariant rather
-than a convenience — the two are written in the same transaction, so a mismatch is a bug, and it
-deserves a test.
+`events.destination_count = count(deliveries WHERE event_id = ... AND generation = 1)` is now a stated
+invariant rather than a convenience — the two are written in the same transaction, so a mismatch is a
+bug, and it deserves a test. Phase 10 keeps that meaning deliberately: retry generations add rows to
+the lineage but never increment `destination_count`, so the column continues to describe the accept-time
+fan-out and never becomes a retry counter.
 
 U4 is approved, so the behaviour of a duplicate is fixed (replay when `request_hash` matches, 409 when it
 differs); the status code and body are fixed too, by U42 (approved revision 10; §4.13.3). U6's storage
@@ -1852,11 +1950,13 @@ every later table has its parents already defined:
 11 organization_subscriptions
 12 audit_logs
 13 idempotency_records
+14 delivery_retry_requests
 ```
 
-`idempotency_records` (13) is last among the DDL units because its composite FK needs `events` (7) to
-exist; the original 12-table order is otherwise untouched, so the previously approved build sequence stays
-valid.
+`idempotency_records` (13) precedes the retry unit because it documents the ingestion idempotency that
+Phase 10 deliberately leaves untouched; `delivery_retry_requests` (14) is last because its org-scoped FKs
+need `deliveries` (8) and its lineage columns extend that table. The original 12-table order is otherwise
+untouched, so the previously approved build sequence stays valid.
 
 Two ordering requirements to respect when writing the files: `api_keys` (4) references `users` (1)
 and `organizations` (2); `events` (7) references `api_keys` (4) for the optional provenance column.
@@ -1887,19 +1987,22 @@ open item rather than an implemented one.
 
 Revision 9 changed none of the above: U46 adds no DDL. **Revision 10 adds one object, not one unit:** U44's
 `idem_assert_linked()` function and `trg_idem_linked` constraint trigger belong **inside unit 13**
-(`idempotency_records`), because the invariant is about that table's rows — so the sequence stays **13 units
-of table DDL plus the protocol notes**, the order is unchanged, and no new migration unit is needed.
+(`idempotency_records`), because the invariant is about that table's rows — so the sequence stays
+**13 units of table DDL plus the protocol notes**, the order is unchanged, and no new migration unit is needed.
 `DEFERRABLE INITIALLY DEFERRED` is what lets the trigger live in the same unit as the table it guards: the
 claim inserts a NULL, the link updates it, and only the commit-time check decides. U43 needs no migration at
 all; `idx_idem_expiry` already exists to serve it, and U42 stores nothing.
 
-**Implementation status (revision 17).** All 13 units exist in `db/migrations/` as paired `up`/`down` files
-(`0001_users` … `0013_idempotency_records`), were applied in this order to PostgreSQL 18.7, and leave the
-schema at migration version **13** with the 13 domain tables plus `schema_migrations`. Unit 13 contains
-`idem_assert_linked()` and `trg_idem_linked` as described above. The migration files — not the DDL excerpts
-in §4 — are the artifacts of record. The implemented migration runner is covered by an integration test that
-asserts the database is already at version 13 and that `Up()` applies nothing further; overview §16 records
-the executed verification and the one check, the race detector, that was not run.
+**Implementation status (revision 22, Phase 10).** All 14 units exist in `db/migrations/` as paired
+`up`/`down` files (`0001_users` … `0014_delivery_retry_generations`), were applied in this order to
+PostgreSQL 18 (locally `postgres:18-alpine`), and leave the schema at migration version **14** with the 14
+domain tables plus `schema_migrations`. Unit 13 contains `idem_assert_linked()` and `trg_idem_linked` as
+described above. Unit 14 adds the `generation`/`parent_delivery_id` lineage on `deliveries` and the
+`delivery_retry_requests` table (§4.8, §4.14); its `down` refuses while any `generation > 1` row exists,
+because collapsing a lineage would destroy retry history. The migration files — not the DDL excerpts in
+§4 — are the artifacts of record. The implemented migration runner is covered by an integration test that
+asserts the database is already at version 14 and that `Up()` applies nothing further; overview §16.15
+records the executed Phase 10 verification.
 
 ## 8. Non-obvious consequences worth reviewing
 

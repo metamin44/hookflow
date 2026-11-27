@@ -14,18 +14,21 @@ const (
 	ScopeBillingRead    = "billing:read"
 	ScopeBillingWrite   = "billing:write"
 	ScopeDeliveriesRead = "deliveries:read"
+	// ScopeDeliveriesRetry grants manual creation of a new delivery generation.
+	ScopeDeliveriesRetry = "deliveries:retry"
 )
 
 // Set is a parsed scope grant. Unknown scopes and wildcards are ignored; an
 // empty grant means events:write only.
 type Set struct {
-	eventsWrite    bool
-	endpointsRead  bool
-	endpointsWrite bool
-	secretsRotate  bool
-	billingRead    bool
-	billingWrite   bool
-	deliveriesRead bool
+	eventsWrite     bool
+	endpointsRead   bool
+	endpointsWrite  bool
+	secretsRotate   bool
+	billingRead     bool
+	billingWrite    bool
+	deliveriesRead  bool
+	deliveriesRetry bool
 }
 
 // Parse interprets stored or operator-supplied scope values.
@@ -48,6 +51,8 @@ func Parse(values []string) Set {
 				set.billingWrite = true
 			case ScopeDeliveriesRead:
 				set.deliveriesRead = true
+			case ScopeDeliveriesRetry:
+				set.deliveriesRetry = true
 			}
 		}
 	}
@@ -59,7 +64,8 @@ func Parse(values []string) Set {
 
 func (s Set) any() bool {
 	return s.eventsWrite || s.endpointsRead || s.endpointsWrite ||
-		s.secretsRotate || s.billingRead || s.billingWrite || s.deliveriesRead
+		s.secretsRotate || s.billingRead || s.billingWrite || s.deliveriesRead ||
+		s.deliveriesRetry
 }
 
 // AllowsEventsWrite reports the events:write capability.
@@ -84,9 +90,13 @@ func (s Set) AllowsBillingWrite() bool { return s.billingWrite }
 // independent scope; no other scope implies it and it implies no other scope.
 func (s Set) AllowsDeliveriesRead() bool { return s.deliveriesRead }
 
+// AllowsDeliveriesRetry reports the deliveries:retry capability. It is
+// independent of deliveries:read: retrying does not grant history visibility.
+func (s Set) AllowsDeliveriesRetry() bool { return s.deliveriesRetry }
+
 // CanonicalStrings renders the granted scopes in the approved storage form.
 func (s Set) CanonicalStrings() []string {
-	granted := make([]string, 0, 7)
+	granted := make([]string, 0, 8)
 	if s.eventsWrite {
 		granted = append(granted, ScopeEventsWrite)
 	}
@@ -107,6 +117,9 @@ func (s Set) CanonicalStrings() []string {
 	}
 	if s.deliveriesRead {
 		granted = append(granted, ScopeDeliveriesRead)
+	}
+	if s.deliveriesRetry {
+		granted = append(granted, ScopeDeliveriesRetry)
 	}
 	slices.Sort(granted)
 	return granted

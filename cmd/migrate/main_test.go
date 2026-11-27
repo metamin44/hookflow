@@ -96,7 +96,7 @@ func TestReportWriterCapturesFirstWriteFailure(t *testing.T) {
 
 func TestFinalizeExitCodeNeverReportsSuccessForUndeliverableResults(t *testing.T) {
 	unavailable := &reportWriter{w: &failingWriter{}}
-	unavailable.println("version: 13")
+	unavailable.println("version: 14")
 	clean := &reportWriter{w: io.Discard}
 
 	tests := []struct {

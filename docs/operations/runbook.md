@@ -66,7 +66,7 @@ go run ./cmd/apikey revoke -organization <org-uuid> -id <key-uuid>
 
 Authentication behaviour: missing or malformed `Authorization` returns `401`; a valid key without the required scope returns `403 insufficient_scope`; unknown prefixes still perform a dummy verification (no prefix oracle); revoked and expired keys fail verification. Suspended organizations may list/get, patch name/description, pause, soft-delete endpoints, deactivate subscriptions, rotate secrets, cancel the organization subscription and revoke API keys, but are denied endpoint creation, activation, URL/header changes, subscription create/reactivate, organization-subscription create/replace and API-key creation. Archived organizations may read under the existing policy but are denied every tenant management write, including endpoint changes/soft-delete, subscription create/reactivate/deactivate, organization-subscription changes/cancellation, rotation and API-key creation/revocation.
 
-Scopes: `endpoints:read` (list/get endpoints and subscriptions), `endpoints:write` (endpoint and subscription writes; implies read; does not grant rotation), `endpoints:secrets:rotate` (rotation only), `billing:read` (read the organization subscription and its history), `billing:write` (create, replace and cancel the organization subscription; implies billing read), `deliveries:read` (the Phase 9 event/delivery/attempt read routes only; independent of every other scope), and `events:write` (`POST /v1/events`; default when no scopes are supplied). Unknown and wildcard values are ignored.
+Scopes: `endpoints:read` (list/get endpoints and subscriptions), `endpoints:write` (endpoint and subscription writes; implies read; does not grant rotation), `endpoints:secrets:rotate` (rotation only), `billing:read` (read the organization subscription and its history), `billing:write` (create, replace and cancel the organization subscription; implies billing read), `deliveries:read` (the Phase 9 event/delivery/attempt read routes only; independent of every other scope), `deliveries:retry` (`POST /v1/deliveries/{delivery_id}/retry` only; independent of `deliveries:read` and every other scope), and `events:write` (`POST /v1/events`; default when no scopes are supplied). Unknown and wildcard values are ignored.
 
 ### Organization subscription lifecycle
 
@@ -158,6 +158,35 @@ Troubleshooting: a cursor created with different filters or another API key is r
 listing. A `404` on an ID that exists elsewhere means the key belongs to a different organization. If a delivery
 shows `in_progress: true` but no attempt progress, inspect the dispatch lease and Worker logs (see §3 onwards); the
 read API itself has no repair action.
+
+### Manual delivery retry (`deliveries:retry`)
+
+```text
+POST /v1/deliveries/{delivery_id}/retry
+Authorization: Bearer <key with deliveries:retry>
+Idempotency-Key: <1–200 characters>
+```
+
+The route has no request body. It creates one **new** `deliveries` row in the same
+`(event_id, endpoint_id)` lineage with `generation = MAX(generation) + 1` and `parent_delivery_id` pointing at
+the delivered source, plus its own initial `outbox_messages` row and exactly one `delivery.retried` audit row.
+The source Delivery, its Attempts, the Event and `events.destination_count` are never updated. The new row takes a
+fresh immutable snapshot (URL, sanitized custom headers, encrypted secret) from the Endpoint's **current** state and
+records the currently active matching subscription, or NULL if none matches.
+
+The source must be terminal `failed`, and the endpoint must still exist, not be soft-deleted and be active. An
+expired event, a live dispatch lease, or a paused/deleted endpoint is rejected; every rule is rechecked after the
+organization → endpoint → source-delivery locks. Responses: `201` with the new Delivery view and a `Location`
+header; `200` with `HookFlow-Idempotent-Replay: true` for a valid replay within the 72-hour key window; `404` for
+an unknown, malformed or cross-tenant source; `403 insufficient_scope` without the scope; `409` for
+`idempotency_key_conflict` (same key used for a different source), `delivery_not_retryable`, `delivery_leased`,
+`event_expired` or `endpoint_ineligible`; `403 organization_suspended` / `organization_archived`. Every retry
+response carries `Cache-Control: no-store` and never includes the URL, headers, secret envelope or payload.
+
+A failed retry generation is itself a terminal failed Delivery and can be retried, producing the next generation
+in the chain. Retries do not reopen or re-send the original delivery, do not create a second Event, and do not
+change the ingestion idempotency key space. The 72-hour retry-key window is independent of the 90-day event
+retention; an expired key is discarded on next use and no longer replays.
 
 ### Destination policy (OD-4) and private endpoints
 

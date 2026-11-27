@@ -1,17 +1,19 @@
 # HookFlow — Architecture Overview
 
-> **Status (documentation revision 21):** approved architecture, with the implementation status that follows
-> M1-E Phase 2.1 recorded in §16. Revision 16 remains the last design-approval revision — it is the **U1
+> **Status (documentation revision 22, Phase 10):** approved architecture, with the implementation status that
+> follows M1-E Phase 2.1 recorded in §16. Revision 16 remains the last design-approval revision — it is the **U1
 > approval round** (application-side UUIDv7; the owner approved it in §11 item 34 and the row is retained and
 > marked **Approved (revision 16)**, while revision 15's premature claim is corrected in §11 items 33–34,
 > §12.14 and §12.15). Revision 14's approvals stand unchanged — U47, U48, U30 **only** for its Go-toolchain
 > half, G1, the ingestion parse order, the `payload` object rule, the inexactness counter and the conformance
 > gate, §11 items 25–32 — revisions 3–10 approvals stand, and G2 stays deferred. The later owner approvals are
 > recorded in §12.16 (A1–A10, B1–B6), §12.17 (F3-A/F3-B/F3-C/F8) and §12.18 (Recovery expiry precedence,
-> 2026-11-23).
+> 2026-11-23). Phase 10's authorized manual-delivery-retry implementation is recorded in §16.15; it adds
+> migration unit 14 and the 14th table (`delivery_retry_requests`) without changing the approved relationship
+> inventory beyond the lineage edges it documents.
 >
 > **The repository is no longer documentation-only.** The Go module `github.com/metamin44/hookflow` exists
-> (`go.mod`, `go.sum`), `db/migrations/` contains the 13 approved units as paired up/down files, and the
+> (`go.mod`, `go.sum`), `db/migrations/` contains the 14 approved units as paired up/down files, and the
 > M1-E Phase 2.1 Go implementation and its tests exist. §16 states exactly what is implemented, what is
 > deliberately deferred, and what was and was not verified. Historical statements below that say "no Go
 > source", "no migration" or "`go.mod` does not exist" describe the revision that wrote them, not the current
@@ -421,7 +423,7 @@ internal/
     http/               Echo server, middleware, error mapping, health endpoints
   shared/               cross-cutting primitives (ids, time, errors)
 db/
-  migrations/           paired up/down SQL migrations (all 13 units exist — §16)
+  migrations/           paired up/down SQL migrations (all 14 units exist — §16)
   queries/              sqlc query files              (still empty)
 docs/architecture/      this documentation set
 deployments/            manifests                     (still empty)
@@ -971,7 +973,7 @@ static text per code above.
   per-conflict `audit_logs` write — a 409 stores nothing anywhere, so a probing caller cannot leave a
   searchable trace of what it guessed.
 
-## 9. Canonical 13-table inventory
+## 9. Canonical 14-table inventory
 
 PostgreSQL, UUID primary keys — every one a **UUIDv7 value generated in the application**, with no database
 default on any of them (U1 approved, revision 16) — snake_case plural names, `timestamptz` throughout. Storage is
@@ -979,8 +981,8 @@ unaffected by that decision: the column type stays `uuid`, 16 bytes with the RFC
 identical for v4 and v7 values. **U3 is resolved to PostgreSQL 18** (owner approval, 2026-11-22); the
 exact patch and tooling compatibility are verified before migration execution.
 Rows 1–12 are the
-originally approved inventory in its approved order; row 13 was added when **U4** was approved and is
-last in the migration order because its composite FK needs `events`.
+originally approved inventory in its approved order; row 13 was added when **U4** was approved; row 14 was
+added by Phase 10 (migration unit 14) for manual delivery retry idempotency.
 
 | # | Table | Owner module | Purpose |
 | --- | --- | --- | --- |
@@ -991,27 +993,34 @@ last in the migration order because its composite FK needs `events`.
 | 5 | `endpoints` | endpoint | Destinations; **reversibly encrypted** secret; soft-deleted via `deleted_at` |
 | 6 | `endpoint_subscriptions` | subscription | Routing rule: one endpoint ↔ one `event_type` |
 | 7 | `events` | event | Accepted events and destination count. **No status column** (U36); **no idempotency key column** (U4) |
-| 8 | `deliveries` | delivery | One row per (event, endpoint) — state, scheduling, and the destination snapshot |
+| 8 | `deliveries` | delivery | One row per (event, endpoint, generation) — state, scheduling, the destination snapshot, and the retry lineage (`generation`, `parent_delivery_id`) |
 | 9 | `delivery_attempts` | delivery | One append-only row per completed HTTP call (U18) |
 | 10 | `outbox_messages` | delivery/platform | Transactional outbox, **N rows per delivery** |
 | 11 | `organization_subscriptions` | subscription | Commercial plan + subscription status per organization |
 | 12 | `audit_logs` | audit | Append-only administrative trail |
 | 13 | `idempotency_records` | event (written by `eventapp.AcceptEvent`; swept by `worker`) | Organization key → request fingerprint (`bytea`, RFC 8785 + SHA-256, U41) → accepted event, **72-hour** life (U4, cleanup per U43). Committed rows never have a NULL `event_id` (U44 trigger); the row records the latest use only (U45) |
+| 14 | `delivery_retry_requests` | delivery/management (created by `RetryDelivery`) | Organization key → source/new Delivery pair, **72-hour** life, independent of ingestion idempotency; replay returns the original new generation, mismatch is 409, expiry makes the key reusable |
 
 Agreed relationships (implemented in schema §3.2): users↔organizations many-to-many through
 `organization_members`; organizations one-to-many to `api_keys`, `endpoints`, `events`,
-`organization_subscriptions`, `audit_logs` and — since U4 — `idempotency_records`; endpoints one-to-many
-to `endpoint_subscriptions` and to `deliveries`; events one-to-many to `deliveries` and, since U4, to
+`organization_subscriptions`, `audit_logs`, `idempotency_records` and — since Phase 10 —
+`delivery_retry_requests`; endpoints one-to-many
+to `endpoint_subscriptions` and to `deliveries`; events one-to-many to `deliveries` and to
 `idempotency_records` (nullable child column, `ON DELETE CASCADE`); deliveries one-to-many to
-`delivery_attempts` and to `outbox_messages`. That is 12 relationships from the original design plus 2
-added with U4, for 14 total. **Revisions 8, 9 and 10 changed none of it**: 13 tables, 14 agreed
-relationships, and no speculative entity, column or edge was introduced for the response contract (U42),
+`delivery_attempts`, to `outbox_messages`, to itself through the nullable `parent_delivery_id` lineage,
+and to `delivery_retry_requests` in two roles (source and new). The original 12 relationships plus 2
+added with U4 make 14; Phase 10 adds the retry-request edges and the self-referencing lineage without
+changing any pre-existing relationship. **Revisions 8, 9 and 10 changed none of the pre-Phase-10
+inventory**: 13 tables, 14 agreed relationships, and no speculative entity, column or edge was introduced
+for the response contract (U42),
 the cleanup job (U43), the NULL guard (U44) or the history question (U45) — the only new DDL object anywhere
 is U44's constraint trigger on the existing table. The three nullable U12 provenance relationships
 (`users→api_keys` creator/revoker, `api_keys→events`, `endpoint_subscriptions→deliveries`) are adopted by
-A10 (2026-11-22): the ERD therefore has 17 relationship lines, while the original 14 keep their status and
-only those three are newly approved. Their actions and same-organization forms were resolved on
+A10 (2026-11-22): before Phase 10 the ERD therefore had 17 relationship lines, while the original 14 keep
+their status and only those three are newly approved. Their actions and same-organization forms were resolved on
 2026-11-23 (F3-A/F3-B/F3-C, §12.17); that changes constraint detail, not the relationship inventory.
+Phase 10 adds four ERD lines — the organization→retry-request edge, the two delivery→retry-request edges
+(source and new) and the self-referential lineage — for 14 entity blocks and 21 relationship lines.
 
 ## 10. Verification and quality plan (for the next phases)
 
@@ -3606,3 +3615,49 @@ full PostgreSQL/RabbitMQ integration suite passed (0 failures after one transien
 passed for all unit packages and for the four Phase 9 history integration tests. golangci-lint v2.15.0 reported only
 the same 12 pre-existing advisory complexity findings (6 `cyclop`, 6 `gocognit`), none in Phase 9 code; lint
 cleanliness is not claimed. No dependency, infrastructure, production-deployment or KMS/Vault change was made.
+
+### 16.15 Phase 10 manual delivery retry generations (2026-11-27)
+
+This is the Phase 10 implementation record. Migration unit 14 adds `deliveries.generation`,
+`deliveries.parent_delivery_id`, the org-scoped self-FK and the `delivery_retry_requests` table; the old
+`uq_deliveries_event_endpoint` becomes `uq_deliveries_event_endpoint_generation`. Ingestion now inserts generation 1
+and conflicts on the three-column target. A manual retry is one application transaction that locks
+organization → endpoint → source delivery, revalidates eligibility after those locks, allocates `MAX(generation)+1`,
+writes a new pending Delivery with `dispatch_seq = 1`, attempt count 0 and a fresh endpoint snapshot, writes its own
+Outbox row and one `delivery.retried` audit row, claims the caller's `Idempotency-Key` in
+`delivery_retry_requests`, and never updates the source Event, Delivery, Attempts or `destination_count`.
+
+The API is `POST /v1/deliveries/{delivery_id}/retry` behind the independent `deliveries:retry` scope. It has no
+request body, requires `Idempotency-Key` (1–200 characters, exactly one header value), returns `201` with a
+`Location` on creation, `200` with `HookFlow-Idempotent-Replay: true` for a valid 72-hour replay, and RFC 9457
+`404`/`403`/`409`/`400` problems otherwise. Unknown, malformed and cross-tenant IDs are indistinguishable `404`s;
+`delivery_not_retryable`, `delivery_leased`, `event_expired`, `endpoint_ineligible` and
+`idempotency_key_conflict` are `409`s. Responses carry `Cache-Control: no-store` and never include URL, headers,
+secret envelope or payload. Phase 9 history responses gain additive `generation`, `parent_delivery_id`,
+`delivery_summary.initial_total` and `delivery_summary.retry_total` fields; `total` keeps its previous meaning, so
+existing clients remain compatible. README, database-schema §4.8/§4.14/§7, ERD, configuration and runbook were
+updated.
+
+Verification on 2026-11-27 used an LF copy of the tree (all text files normalized; `.env` not copied) against the
+development PostgreSQL 18 container and the development RabbitMQ container:
+
+- `gofmt -l .` empty, `go vet ./...` and `go build ./...` clean, `go mod tidy -diff` empty, `git diff --check` clean.
+- Unit tests: `go test ./... -count=1` passed in all 33 test-bearing packages (3 packages have no test files), no
+  failures.
+- Full serial integration suite: `go test -tags=integration ./... -count=1 -p 1` exited 0;
+  `test/integration` took 54.740s. The six Phase 10 tests were also rerun verbosely and all passed in 2.024s:
+  `TestManualDeliveryRetryCreatesSnapshotGeneration`, `TestManualDeliveryRetryIdempotencyAndConcurrency`,
+  `TestManualDeliveryRetryRejectsIneligibleRequests` (four subtests),
+  `TestManualDeliveryRetryGenerationChainAndWorkerEligibility`, `TestRetryGenerationSchemaConstraints` and
+  `TestManualDeliveryRetryExpiredRequestTakeover`.
+- Migration direction proof on a disposable database created on the development PostgreSQL instance:
+  `up` reached version 14, `down 14` rolled back and reported success, `up` re-applied, and `version` reported
+  `14` with `dirty: false`. The database was dropped afterwards.
+- Linux CGO race in the `golang:1.27.4` container: the first full run reported one transient failure in
+  `TestExecutorParentDeadlineCoversBodyRead` (Worker executor, untouched by Phase 10; the request had not reached its
+  local TLS test server). That test then passed five consecutive `-race` repetitions, and a second full
+  `go test -race ./... -count=1` run exited 0. No data race was reported.
+- `golangci-lint` v2.15.0 reported only the same 12 pre-existing advisory complexity findings (6 `cyclop`,
+  6 `gocognit`), none in Phase 10 code; lint cleanliness is not claimed.
+- No schema change outside unit 14, no dependency change, no `.env` or credential staged. At the time this record
+  was written, no commit, push, pull request, hosted CI run, merge or production deployment had been performed.

@@ -37,9 +37,11 @@ Phase 6 management API under `/v1/organizations/{organization_id}/endpoints` (cr
 secret rotation, subscriptions), the Phase 8A organization subscription at
 `/v1/organizations/{organization_id}/subscription` with append-only history at `…/subscriptions`, and the Phase 9
 read-only history API at `/v1/events`, `/v1/events/{event_id}`, `/v1/deliveries`,
-`/v1/deliveries/{delivery_id}` and `/v1/deliveries/{delivery_id}/attempts`. Every `/v1/` route except ingestion
+`/v1/deliveries/{delivery_id}` and `/v1/deliveries/{delivery_id}/attempts`, plus the Phase 10
+`POST /v1/deliveries/{delivery_id}/retry` route. Every `/v1/` route except ingestion
 requires an API key; `POST /v1/events` requires `events:write`, organization subscription routes require
-`billing:read` or `billing:write`, and the five Phase 9 read routes require `deliveries:read`. Unknown routes
+`billing:read` or `billing:write`, the five Phase 9 read routes require `deliveries:read`, and the retry route
+requires `deliveries:retry`. Unknown routes
 return RFC 9457 `404`, wrong methods `405` with `Allow`.
 Readiness pings PostgreSQL; it does not imply RabbitMQ or delivery readiness.
 
@@ -277,6 +279,7 @@ Argon2id PHC verifier, so a lost token must be revoked and replaced. Send it as 
 | `billing:read` | `GET …/subscription` and `GET …/subscriptions` for the key's own organization. |
 | `billing:write` | `PUT`/`DELETE …/subscription`; implies `billing:read`. |
 | `deliveries:read` | The five Phase 9 read routes (`GET /v1/events`, `GET /v1/events/{event_id}`, `GET /v1/deliveries`, `GET /v1/deliveries/{delivery_id}`, `GET /v1/deliveries/{delivery_id}/attempts`) for the key's own organization. Independent of endpoint, ingestion and billing scopes; it grants no write. |
+| `deliveries:retry` | `POST /v1/deliveries/{delivery_id}/retry` only, for the key's own organization. Independent of `deliveries:read`; it grants no history visibility, no endpoint write and no ingestion. |
 
 Unknown or wildcard scope strings are ignored. A key is valid until revoked or `expires_at`.
 

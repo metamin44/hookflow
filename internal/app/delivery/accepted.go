@@ -52,17 +52,17 @@ func (a Accepted) validate() error {
 }
 
 // insertAcceptedSQL writes the initial pending generation. The unique
-// (event_id, endpoint_id) constraint plus DO NOTHING makes an unexpected
-// duplicate visible as a missing row, which the caller treats as partial
-// fan-out and rolls back.
+// (event_id, endpoint_id, generation) constraint plus DO NOTHING makes an
+// unexpected duplicate visible as a missing row, which the caller treats as
+// partial fan-out and rolls back. Retry generations are written separately.
 const insertAcceptedSQL = `
 INSERT INTO deliveries
     (id, organization_id, event_id, endpoint_id, endpoint_subscription_id,
      url, http_headers, secret_encrypted, state, dispatch_seq, next_attempt_at,
-     created_at, updated_at)
+     generation, created_at, updated_at)
 VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid,
-        $6, $7::jsonb, $8, 'pending', 1, $9::timestamptz, now(), now())
-ON CONFLICT (event_id, endpoint_id) DO NOTHING`
+        $6, $7::jsonb, $8, 'pending', 1, $9::timestamptz, 1, now(), now())
+ON CONFLICT (event_id, endpoint_id, generation) DO NOTHING`
 
 // AppendAccepted queues one pending Delivery snapshot with dispatch sequence 1.
 // No attempt row, attempt counter or lease is written at ingestion.

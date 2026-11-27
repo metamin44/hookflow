@@ -28,8 +28,8 @@ func TestMigrationRunnerIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Version() error: %v", err)
 	}
-	if version != 13 || dirty {
-		t.Fatalf("migration state = (version %d, dirty %t), want (13, false)", version, dirty)
+	if version != 14 || dirty {
+		t.Fatalf("migration state = (version %d, dirty %t), want (14, false)", version, dirty)
 	}
 
 	changed, err := runner.Up()
@@ -37,6 +37,6 @@ func TestMigrationRunnerIntegration(t *testing.T) {
 		t.Fatalf("Up() error: %v", err)
 	}
 	if changed {
-		t.Fatal("Up() applied migrations unexpectedly; the database should already be at version 13")
+		t.Fatal("Up() applied migrations unexpectedly; the database should already be at version 14")
 	}
 }

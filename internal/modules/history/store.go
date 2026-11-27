@@ -24,12 +24,15 @@ type Querier interface {
 }
 
 const eventColumns = `e.id::text, e.type, e.received_at, e.created_at,
-	COALESCE(s.total, 0)::int, COALESCE(s.pending, 0)::int, COALESCE(s.retrying, 0)::int,
+	COALESCE(s.total, 0)::int, COALESCE(s.initial_total, 0)::int, COALESCE(s.retry_total, 0)::int,
+	COALESCE(s.pending, 0)::int, COALESCE(s.retrying, 0)::int,
 	COALESCE(s.succeeded, 0)::int, COALESCE(s.failed, 0)::int, COALESCE(s.expired, 0)::int`
 
 const eventSummaryJoin = `
 LEFT JOIN LATERAL (
 	SELECT count(*) AS total,
+		count(*) FILTER (WHERE d.generation = 1) AS initial_total,
+		count(*) FILTER (WHERE d.generation > 1) AS retry_total,
 		count(*) FILTER (WHERE d.state = 'pending') AS pending,
 		count(*) FILTER (WHERE d.state = 'retrying') AS retrying,
 		count(*) FILTER (WHERE d.state = 'succeeded') AS succeeded,
@@ -69,7 +72,8 @@ func ListEvents(ctx context.Context, q Querier, organizationID string, filter Ev
 		var record EventSummary
 		if err := rows.Scan(
 			&record.ID, &record.Type, &record.ReceivedAt, &record.CreatedAt,
-			&record.DeliverySummary.Total, &record.DeliverySummary.Pending,
+			&record.DeliverySummary.Total, &record.DeliverySummary.InitialTotal,
+			&record.DeliverySummary.RetryTotal, &record.DeliverySummary.Pending,
 			&record.DeliverySummary.Retrying, &record.DeliverySummary.Succeeded,
 			&record.DeliverySummary.Failed, &record.DeliverySummary.Expired,
 		); err != nil {
@@ -96,7 +100,8 @@ func GetEvent(ctx context.Context, q Querier, organizationID, eventID string) (E
 	var payload []byte
 	err := q.QueryRow(ctx, query, organizationID, eventID).Scan(
 		&detail.ID, &detail.Type, &detail.ReceivedAt, &detail.CreatedAt,
-		&detail.DeliverySummary.Total, &detail.DeliverySummary.Pending,
+		&detail.DeliverySummary.Total, &detail.DeliverySummary.InitialTotal,
+		&detail.DeliverySummary.RetryTotal, &detail.DeliverySummary.Pending,
 		&detail.DeliverySummary.Retrying, &detail.DeliverySummary.Succeeded,
 		&detail.DeliverySummary.Failed, &detail.DeliverySummary.Expired,
 		&payload, &detail.DestinationCount,
@@ -115,6 +120,7 @@ func GetEvent(ctx context.Context, q Querier, organizationID, eventID string) (E
 
 const deliveryColumns = `d.id::text, d.event_id::text, d.endpoint_id::text, d.state,
 	d.attempt_count, (d.dispatch_lease_expires_at IS NOT NULL AND d.dispatch_lease_expires_at > now()),
+	d.generation, d.parent_delivery_id::text,
 	d.created_at, d.next_attempt_at, d.last_attempt_at, d.completed_at,
 	d.last_response_status, d.dispatch_lease_expires_at, d.last_error`
 
@@ -164,7 +170,7 @@ func GetDelivery(ctx context.Context, q Querier, organizationID, deliveryID stri
 	var lastError *string
 	err := q.QueryRow(ctx, query, organizationID, deliveryID).Scan(
 		&detail.ID, &detail.EventID, &detail.EndpointID, &detail.State,
-		&detail.AttemptCount, &detail.InProgress,
+		&detail.AttemptCount, &detail.InProgress, &detail.Generation, &detail.ParentDeliveryID,
 		&detail.CreatedAt, &detail.NextAttemptAt, &detail.LastAttemptAt, &detail.CompletedAt,
 		&detail.LastResponseStatus, &detail.LeaseExpiresAt, &lastError,
 		&detail.UpdatedAt, &detail.EventType,
@@ -269,7 +275,7 @@ func scanDelivery(row scanner) (DeliverySummary, error) {
 	var lastError *string
 	err := row.Scan(
 		&record.ID, &record.EventID, &record.EndpointID, &record.State,
-		&record.AttemptCount, &record.InProgress,
+		&record.AttemptCount, &record.InProgress, &record.Generation, &record.ParentDeliveryID,
 		&record.CreatedAt, &record.NextAttemptAt, &record.LastAttemptAt, &record.CompletedAt,
 		&record.LastResponseStatus, &record.LeaseExpiresAt, &lastError,
 	)

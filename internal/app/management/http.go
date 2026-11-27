@@ -69,6 +69,7 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc("GET "+deliveriesPath, h.listDeliveries)
 	h.mux.HandleFunc("GET "+deliveryPath, h.getDelivery)
 	h.mux.HandleFunc("GET "+attemptsPath, h.listDeliveryAttempts)
+	h.mux.HandleFunc("POST "+retryPath, h.retryDelivery)
 
 	h.mux.HandleFunc("POST "+endpointsPath, h.createEndpoint)
 	h.mux.HandleFunc("GET "+endpointsPath, h.listEndpoints)
@@ -97,6 +98,7 @@ func (h *Handler) routes() {
 	h.mux.HandleFunc(deliveriesPath, h.methodNotAllowed("GET"))
 	h.mux.HandleFunc(deliveryPath, h.methodNotAllowed("GET"))
 	h.mux.HandleFunc(attemptsPath, h.methodNotAllowed("GET"))
+	h.mux.HandleFunc(retryPath, h.methodNotAllowed("POST"))
 	h.mux.HandleFunc("/", h.unknownRoute)
 }
 

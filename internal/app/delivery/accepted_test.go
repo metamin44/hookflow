@@ -41,6 +41,10 @@ func TestAppendAcceptedQueuesOnePendingInsert(t *testing.T) {
 	if !strings.Contains(query.SQL, "'pending', 1") {
 		t.Errorf("initial state/sequence drift: %s", query.SQL)
 	}
+	if !strings.Contains(query.SQL, "generation") ||
+		!strings.Contains(query.SQL, "ON CONFLICT (event_id, endpoint_id, generation)") {
+		t.Errorf("initial generation conflict target drift: %s", query.SQL)
+	}
 	if len(query.Arguments) != 9 {
 		t.Fatalf("queued %d arguments, want 9", len(query.Arguments))
 	}

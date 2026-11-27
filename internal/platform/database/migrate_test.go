@@ -41,7 +41,7 @@ func (f *fakeMigrationBackend) Close() error {
 }
 
 func TestRunnerUpNoChange(t *testing.T) {
-	backend := &fakeMigrationBackend{version: 13, upErr: migrate.ErrNoChange}
+	backend := &fakeMigrationBackend{version: 14, upErr: migrate.ErrNoChange}
 	runner := &Runner{backend: backend}
 
 	changed, err := runner.Up()
@@ -57,7 +57,7 @@ func TestRunnerUpNoChange(t *testing.T) {
 }
 
 func TestRunnerUpApplied(t *testing.T) {
-	backend := &fakeMigrationBackend{version: 13}
+	backend := &fakeMigrationBackend{version: 14}
 	runner := &Runner{backend: backend}
 
 	changed, err := runner.Up()
@@ -70,7 +70,7 @@ func TestRunnerUpApplied(t *testing.T) {
 }
 
 func TestRunnerUpDirty(t *testing.T) {
-	backend := &fakeMigrationBackend{version: 13, dirty: true}
+	backend := &fakeMigrationBackend{version: 14, dirty: true}
 	runner := &Runner{backend: backend}
 
 	_, err := runner.Up()
@@ -81,8 +81,8 @@ func TestRunnerUpDirty(t *testing.T) {
 	if !errors.As(err, &dirtyErr) {
 		t.Fatalf("Up() error = %T, want *DirtyError", err)
 	}
-	if dirtyErr.Version != 13 {
-		t.Fatalf("dirty version = %d, want 13", dirtyErr.Version)
+	if dirtyErr.Version != 14 {
+		t.Fatalf("dirty version = %d, want 14", dirtyErr.Version)
 	}
 	if backend.upCalls != 0 {
 		t.Fatal("Up() called the backend against a dirty migration state")
@@ -91,8 +91,8 @@ func TestRunnerUpDirty(t *testing.T) {
 
 func TestRunnerUpDirtyFromBackend(t *testing.T) {
 	backend := &fakeMigrationBackend{
-		version: 13,
-		upErr:   migrate.ErrDirty{Version: 13},
+		version: 14,
+		upErr:   migrate.ErrDirty{Version: 14},
 	}
 	runner := &Runner{backend: backend}
 
@@ -104,8 +104,8 @@ func TestRunnerUpDirtyFromBackend(t *testing.T) {
 	if !errors.As(err, &dirtyErr) {
 		t.Fatalf("Up() error = %T, want *DirtyError", err)
 	}
-	if dirtyErr.Version != 13 {
-		t.Fatalf("dirty version = %d, want 13", dirtyErr.Version)
+	if dirtyErr.Version != 14 {
+		t.Fatalf("dirty version = %d, want 14", dirtyErr.Version)
 	}
 }
 
@@ -123,7 +123,7 @@ func TestRunnerUpVersionError(t *testing.T) {
 }
 
 func TestRunnerDownNoChange(t *testing.T) {
-	backend := &fakeMigrationBackend{version: 13, stepsErr: migrate.ErrNoChange}
+	backend := &fakeMigrationBackend{version: 14, stepsErr: migrate.ErrNoChange}
 	runner := &Runner{backend: backend}
 
 	changed, err := runner.Down(2)
@@ -139,7 +139,7 @@ func TestRunnerDownNoChange(t *testing.T) {
 }
 
 func TestRunnerDownApplied(t *testing.T) {
-	backend := &fakeMigrationBackend{version: 13}
+	backend := &fakeMigrationBackend{version: 14}
 	runner := &Runner{backend: backend}
 
 	changed, err := runner.Down(2)
@@ -157,7 +157,7 @@ func TestRunnerDownApplied(t *testing.T) {
 func TestRunnerDownInvalidCount(t *testing.T) {
 	for _, n := range []int{0, -1} {
 		t.Run(fmt.Sprintf("count_%d", n), func(t *testing.T) {
-			backend := &fakeMigrationBackend{version: 13}
+			backend := &fakeMigrationBackend{version: 14}
 			runner := &Runner{backend: backend}
 
 			if _, err := runner.Down(n); err == nil {
@@ -171,7 +171,7 @@ func TestRunnerDownInvalidCount(t *testing.T) {
 }
 
 func TestRunnerDownDirty(t *testing.T) {
-	backend := &fakeMigrationBackend{version: 13, dirty: true}
+	backend := &fakeMigrationBackend{version: 14, dirty: true}
 	runner := &Runner{backend: backend}
 
 	_, err := runner.Down(1)
@@ -188,28 +188,28 @@ func TestRunnerDownDirty(t *testing.T) {
 }
 
 func TestRunnerVersion(t *testing.T) {
-	backend := &fakeMigrationBackend{version: 13}
+	backend := &fakeMigrationBackend{version: 14}
 	runner := &Runner{backend: backend}
 
 	version, dirty, err := runner.Version()
 	if err != nil {
 		t.Fatalf("Version() error: %v", err)
 	}
-	if version != 13 || dirty {
-		t.Fatalf("Version() = (%d, %t), want (13, false)", version, dirty)
+	if version != 14 || dirty {
+		t.Fatalf("Version() = (%d, %t), want (14, false)", version, dirty)
 	}
 }
 
 func TestRunnerVersionDirty(t *testing.T) {
-	backend := &fakeMigrationBackend{version: 13, dirty: true}
+	backend := &fakeMigrationBackend{version: 14, dirty: true}
 	runner := &Runner{backend: backend}
 
 	version, dirty, err := runner.Version()
 	if err != nil {
 		t.Fatalf("Version() error: %v", err)
 	}
-	if version != 13 || !dirty {
-		t.Fatalf("Version() = (%d, %t), want (13, true)", version, dirty)
+	if version != 14 || !dirty {
+		t.Fatalf("Version() = (%d, %t), want (14, true)", version, dirty)
 	}
 }
 

@@ -22,12 +22,14 @@ type historyEventDoc struct {
 	Payload          json.RawMessage `json:"payload"`
 	DestinationCount int             `json:"destination_count"`
 	DeliverySummary  struct {
-		Total     int `json:"total"`
-		Pending   int `json:"pending"`
-		Retrying  int `json:"retrying"`
-		Succeeded int `json:"succeeded"`
-		Failed    int `json:"failed"`
-		Expired   int `json:"expired"`
+		Total        int `json:"total"`
+		InitialTotal int `json:"initial_total"`
+		RetryTotal   int `json:"retry_total"`
+		Pending      int `json:"pending"`
+		Retrying     int `json:"retrying"`
+		Succeeded    int `json:"succeeded"`
+		Failed       int `json:"failed"`
+		Expired      int `json:"expired"`
 	} `json:"delivery_summary"`
 	Deliveries          []historyDeliveryDoc `json:"deliveries"`
 	DeliveriesTruncated bool                 `json:"deliveries_truncated"`
@@ -40,6 +42,8 @@ type historyDeliveryDoc struct {
 	State              string     `json:"state"`
 	AttemptCount       int        `json:"attempt_count"`
 	InProgress         bool       `json:"in_progress"`
+	Generation         int        `json:"generation"`
+	ParentDeliveryID   *string    `json:"parent_delivery_id"`
 	CreatedAt          time.Time  `json:"created_at"`
 	NextAttemptAt      *time.Time `json:"next_attempt_at"`
 	LastAttemptAt      *time.Time `json:"last_attempt_at"`
@@ -126,6 +130,8 @@ type seedDelivery struct {
 	LastStatus     *int
 	LastError      *string
 	LeaseExpiresAt *time.Time
+	Generation     int
+	ParentID       *string
 }
 
 func (f *mgmtFixture) seedDelivery(organizationID string, spec seedDelivery) {
@@ -136,19 +142,23 @@ func (f *mgmtFixture) seedDelivery(organizationID string, spec seedDelivery) {
 	if spec.LeaseExpiresAt != nil {
 		leaseToken = spec.ID
 	}
+	generation := spec.Generation
+	if generation == 0 {
+		generation = 1
+	}
 	if _, err := f.pool.Exec(ctx,
 		`INSERT INTO deliveries
 		     (id, organization_id, event_id, endpoint_id, url, secret_encrypted,
 		      state, dispatch_seq, attempt_count, next_attempt_at, last_attempt_at,
 		      last_response_status, last_error, created_at, updated_at, completed_at,
-		      dispatch_lease_token, dispatch_lease_expires_at)
+		      dispatch_lease_token, dispatch_lease_expires_at, generation, parent_delivery_id)
 		 VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid,
 		         'https://receiver.invalid/hook?token=DELIVERY-URL-SECRET', 'ENVELOPE-SECRET',
-		         $5, 1, $6, $7, $8, $9, $10, $11, $11, $12, $13::uuid, $14)`,
+		         $5, 1, $6, $7, $8, $9, $10, $11, $11, $12, $13::uuid, $14, $15, $16::uuid)`,
 		spec.ID, organizationID, spec.EventID, spec.EndpointID,
 		spec.State, spec.AttemptCount, spec.NextAttemptAt, spec.LastAttemptAt,
 		spec.LastStatus, spec.LastError, spec.CreatedAt, spec.CompletedAt,
-		leaseToken, spec.LeaseExpiresAt,
+		leaseToken, spec.LeaseExpiresAt, generation, spec.ParentID,
 	); err != nil {
 		f.t.Fatalf("seed delivery: %v", err)
 	}
@@ -193,6 +203,7 @@ func (f *mgmtFixture) cleanupOrgRows(organizationID string) {
 		defer cancel()
 		for _, statement := range []string{
 			`DELETE FROM delivery_attempts WHERE organization_id = $1::uuid`,
+			`DELETE FROM delivery_retry_requests WHERE organization_id = $1::uuid`,
 			`DELETE FROM deliveries WHERE organization_id = $1::uuid`,
 			`DELETE FROM events WHERE organization_id = $1::uuid`,
 			`DELETE FROM endpoints WHERE organization_id = $1::uuid`,
@@ -211,6 +222,7 @@ func (f *mgmtFixture) cleanupSecondOrg(organizationID string) {
 		defer cancel()
 		for _, statement := range []string{
 			`DELETE FROM delivery_attempts WHERE organization_id = $1::uuid`,
+			`DELETE FROM delivery_retry_requests WHERE organization_id = $1::uuid`,
 			`DELETE FROM deliveries WHERE organization_id = $1::uuid`,
 			`DELETE FROM events WHERE organization_id = $1::uuid`,
 			`DELETE FROM endpoints WHERE organization_id = $1::uuid`,

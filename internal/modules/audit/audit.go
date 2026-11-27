@@ -28,6 +28,7 @@ const (
 	TargetSubscription             = "endpoint_subscription"
 	TargetOrganizationSubscription = "organization_subscription"
 	TargetAPIKey                   = "api_key"
+	TargetDelivery                 = "delivery"
 )
 
 // Record is one audit_logs row. ActorID and TargetID are optional.

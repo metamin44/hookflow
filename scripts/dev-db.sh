@@ -78,11 +78,11 @@ postgres_container_id() {
 }
 
 wait_healthy() {
-  local cid status i
+  local cid status
   cid="$(postgres_container_id)"
   [ -n "$cid" ] || die "PostgreSQL container was not created"
 
-  for i in $(seq 1 60); do
+  for _ in $(seq 1 60); do
     status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid" 2>/dev/null || true)"
     case "$status" in
       healthy)

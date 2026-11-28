@@ -1,0 +1,128 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    ":disableDependencyDashboard"
+  ],
+  "timezone": "UTC",
+  "schedule": [
+    "before 06:00 on Monday"
+  ],
+  "automerge": false,
+  "platformAutomerge": false,
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "pinDigests": true,
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
+  "enabledManagers": [
+    "gomod",
+    "github-actions",
+    "docker-compose",
+    "custom.regex"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update digest-pinned service container images in GitHub Actions workflows",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.*\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "image:\\s*['\"]?(?<depName>[^'\"\\s:@]+):(?<currentValue>[^'\"\\s@]+)@(?<currentDigest>sha256:[a-f0-9]{64})['\"]?"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Group non-major Go module updates to reduce PR noise",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "groupName": "Go modules (non-major)",
+      "labels": [
+        "dependencies",
+        "go"
+      ]
+    },
+    {
+      "description": "Keep Go toolchain updates isolated for explicit review",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchDepNames": [
+        "go"
+      ],
+      "groupName": "Go toolchain",
+      "labels": [
+        "dependencies",
+        "go"
+      ]
+    },
+    {
+      "description": "Group GitHub Actions updates while preserving full commit SHA pins",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "GitHub Actions",
+      "labels": [
+        "dependencies",
+        "github-actions"
+      ]
+    },
+    {
+      "description": "Pin and update Docker Compose and CI service container image digests",
+      "matchDatasources": [
+        "docker"
+      ],
+      "pinDigests": true,
+      "matchUpdateTypes": [
+        "digest",
+        "patch",
+        "minor"
+      ],
+      "groupName": "Container image digests",
+      "labels": [
+        "dependencies",
+        "docker"
+      ]
+    },
+    {
+      "description": "Keep RabbitMQ 4.3.x compatibility-floor service image on the 4.3 line",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "rabbitmq"
+      ],
+      "matchCurrentValue": "/^4\\.3\\./",
+      "allowedVersions": "/^4\\.3\\./"
+    },
+    {
+      "description": "Keep PostgreSQL 18 service image on major version 18",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "postgres"
+      ],
+      "matchCurrentValue": "/^18-/",
+      "allowedVersions": "/^18-/"
+    },
+    {
+      "description": "Prevent floating latest tags from ever being proposed",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchNewValue": "latest",
+      "enabled": false
+    }
+  ]
+}

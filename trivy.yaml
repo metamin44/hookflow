@@ -1,0 +1,37 @@
+# Trivy configuration for HookFlow (verified for Trivy v0.76.2).
+# Scoped intentionally to infrastructure/Compose misconfiguration and pinned
+# container image OS/package vulnerabilities:
+#   - Go dependency vulnerability scanning is owned by govulncheck.
+#   - Secret detection is owned by Gitleaks.
+
+timeout: 5m0s
+
+scan:
+  disable-telemetry: true
+  skip-version-check: true
+  skip-dirs:
+    - .git
+    - .github
+  skip-files:
+    - .golangci.yml
+    - .golangci-security.yml
+    - trivy.yaml
+
+misconfiguration:
+  scanners:
+    - azure-arm
+    - cloudformation
+    - dockerfile
+    - helm
+    - kubernetes
+    - terraform
+    - terraformplan-json
+    - terraformplan-snapshot
+    - ansible
+    - yaml
+
+rego:
+  check:
+    - .trivy/policies
+  namespaces:
+    - user

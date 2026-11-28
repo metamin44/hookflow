@@ -1,32 +1,26 @@
 version: "2"
 
+# Advisory complexity, style, and formatting configuration for HookFlow.
+# Blocking security and correctness linters (gosec, staticcheck, errcheck,
+# bodyclose, sqlclosecheck, depguard, bidichk, noctx, nolintlint, etc.) run
+# separately in .golangci-security.yml without duplicating analyzers.
+# Go version is inherited automatically from go.mod.
+
 run:
-  go: "1.27.4"
   timeout: 5m
   tests: true
 
 linters:
   default: none
   enable:
-    - bodyclose
     - cyclop
-    - depguard
-    - durationcheck
-    - errcheck
-    - errorlint
     - funlen
     - gocognit
-    - gosec
-    - govet
     - importas
-    - ineffassign
     - misspell
     - nestif
-    - nilerr
     - prealloc
     - revive
-    - sqlclosecheck
-    - staticcheck
     - unconvert
     - unused
   settings:
@@ -39,38 +33,6 @@ linters:
       min-complexity: 30
     nestif:
       min-complexity: 6
-    depguard:
-      rules:
-        application-not-command:
-          files:
-            - "**/internal/app/**"
-          deny:
-            - pkg: github.com/metamin44/hookflow/cmd
-              desc: composition roots must not be imported by application packages
-        modules-not-application:
-          files:
-            - "**/internal/modules/**"
-          deny:
-            - pkg: github.com/metamin44/hookflow/internal/app
-              desc: domain modules must not import the application layer
-        platform-not-features:
-          files:
-            - "**/internal/platform/**"
-          deny:
-            - pkg: github.com/metamin44/hookflow/internal/app
-              desc: platform packages must not import the application layer
-            - pkg: github.com/metamin44/hookflow/internal/modules
-              desc: platform packages must not import feature modules
-        shared-not-internals:
-          files:
-            - "**/internal/shared/**"
-          deny:
-            - pkg: github.com/metamin44/hookflow/internal/app
-              desc: shared primitives must remain below application services
-            - pkg: github.com/metamin44/hookflow/internal/modules
-              desc: shared primitives must remain below feature modules
-            - pkg: github.com/metamin44/hookflow/internal/platform
-              desc: shared primitives must not depend on platform implementations
     importas:
       alias:
         - pkg: github.com/metamin44/hookflow/internal/platform/http
@@ -82,7 +44,6 @@ linters:
           - cyclop
           - funlen
           - gocognit
-          - gosec
           - nestif
 
 formatters:

@@ -76,7 +76,8 @@ func deterministicJitter(deliveryID string, attemptNumber int, base time.Duratio
 		return lower
 	}
 	digest := sha256.Sum256([]byte(deliveryID + ":" + strconv.Itoa(attemptNumber)))
-	offset := time.Duration(binary.BigEndian.Uint64(digest[:8]) % uint64(span+1)) //nolint:gosec // span is positive and bounded by MaxInt64/2.
+	// #nosec G115 -- span is positive and bounded by MaxInt64/2, so span+1 and the modulo result fit in int64.
+	offset := time.Duration(binary.BigEndian.Uint64(digest[:8]) % uint64(span+1))
 	return saturatedDurationAdd(lower, offset)
 }
 
@@ -103,7 +104,8 @@ func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
 		if err != nil {
 			return 0, false
 		}
-		return saturatedDurationAdd(time.Duration(seconds)*time.Second, 0), true //nolint:gosec // Decimal comparison above caps seconds at 3600.
+		// #nosec G115 -- decimal comparison above caps seconds at 3600 before conversion to time.Duration.
+		return saturatedDurationAdd(time.Duration(seconds)*time.Second, 0), true
 	}
 
 	date, err := http.ParseTime(value)
@@ -140,7 +142,8 @@ func DecryptFailurePacing(deliveryID string, base time.Duration) time.Duration {
 	}
 	maximumExtra := base / 5
 	digest := sha256.Sum256([]byte(deliveryID))
-	extra := time.Duration(binary.BigEndian.Uint64(digest[:8]) % uint64(maximumExtra+1)) //nolint:gosec // maximumExtra is positive and bounded by MaxInt64/5.
+	// #nosec G115 -- maximumExtra is positive and bounded by MaxInt64/5, so maximumExtra+1 and the modulo result fit in int64.
+	extra := time.Duration(binary.BigEndian.Uint64(digest[:8]) % uint64(maximumExtra+1))
 	return saturatedDurationAdd(base, extra)
 }
 

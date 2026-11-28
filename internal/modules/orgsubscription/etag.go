@@ -35,7 +35,7 @@ func StrongTag(rep Representation) string {
 
 func writeString(w hash.Hash, value string) {
 	var length [4]byte
-	//nolint:gosec // Bounded by the API and schema field widths.
+	// #nosec G115 -- value length is bounded by API and schema field widths and fits in uint32.
 	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
 	_, _ = w.Write(length[:])
 	_, _ = w.Write([]byte(value))
@@ -53,9 +53,9 @@ func writeTime(w hash.Hash, value *time.Time) {
 func writeTimestamp(w hash.Hash, value time.Time) {
 	utc := value.UTC()
 	var encoded [16]byte
-	//nolint:gosec // A full int64 seconds range is intentionally encoded bit-for-bit.
+	// #nosec G115 -- full int64 Unix seconds range is intentionally encoded bit-for-bit as uint64.
 	binary.BigEndian.PutUint64(encoded[:8], uint64(utc.Unix()))
-	//nolint:gosec // time.Time.Nanosecond is documented as 0..999999999.
+	// #nosec G115 -- time.Time.Nanosecond is documented in [0, 999999999] and fits in uint64.
 	binary.BigEndian.PutUint64(encoded[8:], uint64(utc.Nanosecond()))
 	_, _ = w.Write(encoded[:])
 }

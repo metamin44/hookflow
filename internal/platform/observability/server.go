@@ -19,7 +19,7 @@ type Server struct {
 // StartServer binds and serves metrics. A bind failure is returned rather than
 // silently disabling observability.
 func StartServer(ctx context.Context, address string, metrics *Metrics, logger *slog.Logger) (*Server, error) {
-	listener, err := net.Listen("tcp", address)
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("listen metrics: %w", err)
 	}
@@ -37,7 +37,7 @@ func StartServer(ctx context.Context, address string, metrics *Metrics, logger *
 			logger.Error("metrics server failed", "error_class", "internal")
 		}
 	}()
-	//nolint:gosec // Shutdown must outlive the canceled startup/run context.
+	// #nosec G118 -- shutdown must use a fresh bounded context after the parent run context is canceled.
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

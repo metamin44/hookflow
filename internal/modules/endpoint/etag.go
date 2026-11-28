@@ -46,7 +46,7 @@ func QuotedHeader(tag string) string { return `"` + tag + `"` }
 
 func writeField(w hash.Hash, value []byte) {
 	var length [4]byte
-	//nolint:gosec // Field lengths are bounded by the request limits (<= 16 KiB).
+	// #nosec G115 -- field lengths are bounded by the request limits (<= 16 KiB) and fit in uint32.
 	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
 	_, _ = w.Write(length[:])
 	_, _ = w.Write(value)
@@ -78,7 +78,7 @@ func writeHeaders(w hash.Hash, headers map[string]string) {
 	}
 	names = SortedHeaderNames(normalized)
 	var count [4]byte
-	//nolint:gosec // Header count is capped at 32.
+	// #nosec G115 -- header count is capped at 32 and fits in uint32.
 	binary.BigEndian.PutUint32(count[:], uint32(len(names)))
 	_, _ = w.Write(count[:])
 	for _, name := range names {

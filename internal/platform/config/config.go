@@ -11,9 +11,10 @@ import (
 
 // Environment variable names approved for the PostgreSQL development settings.
 const (
-	EnvDBName     = "HOOKFLOW_DB_NAME"
-	EnvDBUser     = "HOOKFLOW_DB_USER"
-	EnvDBPassword = "HOOKFLOW_DB_PASSWORD" //nolint:gosec // Environment variable name, not a credential.
+	EnvDBName = "HOOKFLOW_DB_NAME"
+	EnvDBUser = "HOOKFLOW_DB_USER"
+	// #nosec G101 -- environment variable name constant, not a hardcoded credential.
+	EnvDBPassword = "HOOKFLOW_DB_PASSWORD"
 	EnvDBHost     = "HOOKFLOW_DB_HOST"
 	EnvDBPort     = "HOOKFLOW_DB_PORT"
 	EnvDBSSLMode  = "HOOKFLOW_DB_SSLMODE"

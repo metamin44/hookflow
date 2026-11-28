@@ -146,13 +146,19 @@ jobs:
       - name: Collect immutable pinned service images
         run: |
           set -euo pipefail
-          grep -Eo '[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[a-f0-9]{64}' compose.yaml .github/workflows/ci.yml \
+          grep -hEo '[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[a-f0-9]{64}' compose.yaml .github/workflows/ci.yml \
             | sort -u > "$RUNNER_TEMP/hookflow-pinned-images.txt"
           count="$(wc -l < "$RUNNER_TEMP/hookflow-pinned-images.txt")"
           if [ "$count" -lt 3 ]; then
             echo "Expected at least 3 immutable @sha256 pinned service images, found $count"
             exit 1
           fi
+          while IFS= read -r image; do
+            if [[ ! "$image" =~ ^[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[a-f0-9]{64}$ ]]; then
+              echo "Unexpected extracted image reference: $image"
+              exit 1
+            fi
+          done < "$RUNNER_TEMP/hookflow-pinned-images.txt"
           cat "$RUNNER_TEMP/hookflow-pinned-images.txt"
       - name: Scan pinned service images for fixed CRITICAL OS CVEs (blocking)
         run: |

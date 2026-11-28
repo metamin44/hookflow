@@ -429,8 +429,80 @@ Production activation is **not approved**. Resolve and verify all of the followi
 
 ## 9. CI and security automation
 
-- Pushes and pull requests run `.github/workflows/ci.yml`: gofmt, vet/build, unit tests, module verification, JCS conformance and bounded fuzzing, both RabbitMQ integration versions, race detection, advisory lint, and `govulncheck`.
-- `.github/workflows/nightly.yml` reuses the complete CI workflow through `workflow_call` at 02:17 UTC daily and supports `workflow_dispatch`. It duplicates no job steps. Its first hosted run is pending.
-- `govulncheck` is installed with `go install golang.org/x/vuln/cmd/govulncheck@v1.10.0`. Reachable (symbol) findings fail the job. Package and module-only findings are written to the job summary; the workflow never edits `go.mod` or `go.sum` to suppress them. Dependency upgrades remain a separate reviewed action.
-- Workflows use top-level `contents: read`, `persist-credentials: false` on checkout, commit-SHA-pinned third-party actions, and no repository secrets. Service-container credentials are disposable CI-only values and are not echoed.
-- Baseline source scan on 2026-11-26: 0 reachable vulnerabilities and 1 module-only finding, `GO-2026-5932` for `golang.org/x/crypto/openpgp` in `golang.org/x/crypto v0.58.0`. HookFlow does not import or call that package; no upgrade was made. The finding stays visible in the summary.
+### Blocking CI gates and advisory checks
+
+Pushes, pull requests, manual dispatches, and the daily `02:17 UTC` [nightly workflow](../../.github/workflows/nightly.yml) (via self-repository `$/` `workflow_call`) execute `.github/workflows/ci.yml`. Go setup steps read the canonical toolchain version directly from `go.mod` (`go-version-file: go.mod`).
+
+| Job | Behavior | Tool / Pin | Purpose |
+| --- | --- | --- | --- |
+| `quality` | Blocking | Go from `go.mod` | `gofmt -l .`, `go vet ./...`, `go build ./...`, unit tests, `go mod verify`, `go mod tidy -diff`. |
+| `security-lint` | Blocking | `golangci-lint v2.15.0` (`.golangci-security.yml`) | Enforces `gosec`, `bidichk`, `bodyclose`, `sqlclosecheck`, `errcheck`, `errorlint`, `govet`, `nilerr`, `noctx`, `nolintlint`, `staticcheck`, `ineffassign`, `durationcheck`, and `depguard` without `continue-on-error`. |
+| `secrets` | Blocking | `gitleaks v8.30.1` (`.gitleaks.toml`) | Scans checked-out files and Git history with `--redact=100`, including custom rules for `whsec_`, `hfse1.`, API keys, Argon2id PHC hashes, File KEK keyrings, AMQP/PostgreSQL credential URIs, and password assignments. |
+| `workflow-security` | Blocking | `zizmor v1.33.1` | Audits `.github/workflows` with `--persona=pedantic --strict-collection` for permissions, SHA pinning, template injection, and self-repository safety. |
+| `container-config-security` | Blocking | `trivy v0.76.2` (`trivy.yaml`, `.trivy/policies/`) | Blocks HIGH/CRITICAL Compose/IaC misconfigurations (`HF-COMPOSE-001`..`006` plus future Dockerfiles/manifests) and fixed CRITICAL OS CVEs across all `@sha256` pinned service images; publishes full OS+library HIGH/CRITICAL findings to `$GITHUB_STEP_SUMMARY`. |
+| `shell-checks` | Blocking | `shellcheck v0.11.0` | Runs `shellcheck scripts/*.sh` and static safety checks in `scripts/dev-db_test.sh`. |
+| `vulnerability` | Blocking | `govulncheck v1.10.0` | Fails on reachable (symbol) Go vulnerabilities; publishes unreachable package/module findings to `$GITHUB_STEP_SUMMARY` without editing `go.mod`/`go.sum`. |
+| `jcs-conformance` | Blocking | Go + Node.js | RFC 8785 fixtures, V8 conformance (`-tags=v8conf`), and 60s bounded `FuzzCanonicalize` with a zero-execution guard. |
+| `secrets-fuzz` | Blocking | Go | 45s bounded `FuzzDecode` against the `hfse1.` secret envelope parser with a zero-execution guard. |
+| `integration` | Blocking | Pinned Postgres 18 + RabbitMQ 4.4.1 / 4.3.8 | Runs `-tags=integration` with zero-skip enforcement and down-14/up migration proof; the RabbitMQ `4.4.1` leg runs with `CGO_ENABLED=1` and `-race`. |
+| `race` | Blocking | Go (`CGO_ENABLED=1`) | Fast unit-suite race detector (`go test -race ./... -count=1`). |
+| `lint` | Advisory | `golangci-lint v2.15.0` (`.golangci.yml`) | Runs complexity and style checks (`cyclop`, `funlen`, `gocognit`, `nestif`, `revive`, etc.) separately with `continue-on-error: true` so analyzers are not duplicated and complexity debt never weakens security gates. |
+
+Workflows use top-level `permissions: contents: read`, `persist-credentials: false` on every checkout, full 40-char commit-SHA-pinned third-party actions, SHA-256 checksum verification for downloaded CLI binaries, and no repository secrets. Service-container credentials are disposable CI-only values and are never echoed.
+
+### Local security verification commands
+
+Install official release binaries pinned to the versions above and verify their SHA-256 checksums before use. Run checks from the repository root:
+
+```bash
+# Blocking Go security & correctness linters
+golangci-lint run --config .golangci-security.yml ./...
+
+# Advisory complexity/style linters
+golangci-lint run ./...
+
+# Go vulnerability analysis
+govulncheck -show=verbose ./...
+
+# Secret scanning (scans Git commits or staged changes; never point `gitleaks dir` at an untracked local .env)
+gitleaks git --config .gitleaks.toml --redact=100 .
+gitleaks git --staged --config .gitleaks.toml --redact=100 .
+
+# GitHub Actions workflow security audit
+zizmor --offline --persona=pedantic --strict-collection .github/workflows
+
+# Compose/IaC misconfiguration scan
+trivy config --config trivy.yaml --severity HIGH,CRITICAL --exit-code 1 .
+
+# Pinned container image scan (uses local Docker cache without pulling when images are present)
+trivy image --config trivy.yaml --image-src docker --scanners vuln --pkg-types os --severity CRITICAL --ignore-unfixed --exit-code 1 \
+  postgres:18-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
+
+# Shell script linting and static check
+shellcheck scripts/*.sh
+bash scripts/dev-db_test.sh
+
+# Bounded secret-envelope fuzzing (45s)
+go test -run='^$' -fuzz='^FuzzDecode$' -fuzztime=45s ./internal/platform/secrets
+
+# Linux integration race run (requires CGO/GCC and isolated PostgreSQL + RabbitMQ)
+CGO_ENABLED=1 go test -race -tags=integration ./... -count=1 -p 1
+```
+
+Optional pre-commit guard: to scan staged diffs automatically before local commits without installing an external hook framework or altering source files, add `gitleaks git --staged --config .gitleaks.toml --redact=100 .` to your local `.git/hooks/pre-commit`.
+
+### Interpreting findings and handling false positives
+
+- **Gitleaks:** Never add blanket allowlists for `*_test.go`, `compose.yaml`, or `.github/workflows/`. Any exception in `.gitleaks.toml` must use `condition = "AND"` pairing an exact file path regex with an exact synthetic placeholder regex so genuine secrets in those same files still fail.
+- **Security lint (`gosec` / `nolintlint`):** Never silence findings with broad `//nolint:gosec`. Use rule-specific `// #nosec Gxxx -- <concrete safety proof>` directives (matching `cmd/dev-keyring/main.go` and `internal/platform/secrets/envelope.go`) only after verifying the underlying invariant. Never suppress genuine vulnerabilities.
+- **Zizmor:** Fix workflow security findings directly rather than suppressing them. If an audit ever requires a suppression, document the narrow scope and rationale inline.
+- **Trivy:** Misconfiguration failures (`HF-COMPOSE-*`, Dockerfile/IaC rules) must be fixed in configuration. Container OS/library CVEs should be remediated by refreshing the pinned `@sha256` digest via a reviewed update PR; do not add permanent `.trivyignore` entries to hide real fixed CVEs. As of 2026-11-28, `postgres:18-alpine@sha256:0115267a...` is already the latest official `postgres:18-alpine` (18.7 / Alpine 3.24, published 2026-11-21) digest; Alpine `libxml2` security backports landed 2026-11-26/27 and await an upstream `docker-library/postgres` rebuild (which Renovate will propose automatically), and `gosu 1.20` (`Go 1.24.6`) stdlib scanner findings affect all official PostgreSQL 18 variants without reaching TLS/HTTP packages. Do not switch from Alpine (`musl`) to Debian (`glibc`) on an existing local `hookflow-postgres-data` volume without an explicit re-initialization plan due to collation compatibility.
+- **govulncheck:** Reachable symbol findings block merges. `golang.org/x/crypto` was upgraded to `v0.59.0` (eliminating module-only `GO-2026-5932` in the removed `openpgp` package), leaving 0 symbol, 0 package, and 0 module findings. Any future unreachable module-only findings stay visible in the CI summary until resolved via a reviewed dependency upgrade.
+
+### Dependency updates, reporting, and remaining manual GitHub steps
+
+- **Automated updates (`renovate.json`):** Renovate is configured for `gomod`, `github-actions` (preserving commit-SHA pins), `docker-compose`, and CI service-container `@sha256` digests on a weekly Monday schedule with grouped PRs, `pinDigests: true`, and `automerge: false`. Maintainers must review and test every update PR (including verifying compatibility floors such as RabbitMQ 4.3.x and PostgreSQL 18).
+- **Manual activation required on GitHub:** Install and grant the Mend Renovate GitHub App access to `metamin44/hookflow` so `renovate.json` runs automatically.
+- **SARIF / GitHub Code Scanning:** Security scanners currently publish readable CI logs and `$GITHUB_STEP_SUMMARY` reports rather than SARIF uploads, avoiding unverified `security-events: write` failures before Code Scanning is confirmed enabled in GitHub repository settings. Once Code Scanning is verified active, SARIF upload can be added per-job with job-scoped `security-events: write` guarded for non-fork events.
+- **Vulnerability disclosure:** See [SECURITY.md](../../SECURITY.md) for private reporting via GitHub Security Advisories.
+- **Production readiness distinction:** Passing these repository security gates hardens development and CI hygiene only; it does **not** clear the production blockers listed in §8 (KMS/Vault custody, KEK retirement/purge tooling, network egress allowlists, API rate limiting/WAF, HA drills).

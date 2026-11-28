@@ -137,12 +137,12 @@ func (e Envelope) Encode() (string, error) {
 	}
 	buf := make([]byte, 0, total)
 	buf = append(buf, 'H', 'F', 'S', 'E')
-	//nolint:gosec // Validate bounds the KID length before this conversion.
+	// #nosec G115 -- Validate guarantees KID length is within [1, 64], fitting in byte.
 	buf = append(buf, e.Version, e.Algorithm, e.Purpose, byte(len(e.KID)))
 	buf = append(buf, e.KID...)
 	buf = append(buf, e.Provider)
 	var length [2]byte
-	//nolint:gosec // Validate bounds the wrapped length before this conversion.
+	// #nosec G115 -- Validate guarantees WrappedDEK length is within [1, 1024], fitting in uint16.
 	binary.BigEndian.PutUint16(length[:], uint16(len(e.WrappedDEK)))
 	buf = append(buf, length[:]...)
 	buf = append(buf, e.WrappedDEK...)

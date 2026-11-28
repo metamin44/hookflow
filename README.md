@@ -128,6 +128,13 @@ go build ./...
 go test ./... -count=1
 go mod verify
 go mod tidy -diff
+golangci-lint run --config .golangci-security.yml ./...
+govulncheck -show=verbose ./...
+gitleaks git --config .gitleaks.toml --redact=100 .
+zizmor --offline --persona=pedantic --strict-collection .github/workflows
+trivy config --config trivy.yaml --severity HIGH,CRITICAL --exit-code 1 .
+shellcheck scripts/*.sh
+bash scripts/dev-db_test.sh
 go run ./cmd/migrate up
 go test -tags=integration ./... -count=1 -p 1
 ```
@@ -136,9 +143,11 @@ go test -tags=integration ./... -count=1 -p 1
 
 ```bash
 CGO_ENABLED=1 go test -race ./... -count=1
+CGO_ENABLED=1 go test -race -tags=integration ./... -count=1 -p 1
+go test -run='^$' -fuzz='^FuzzDecode$' -fuzztime=45s ./internal/platform/secrets
 ```
 
-CI defines the same integration suite against pinned PostgreSQL 18 and RabbitMQ 4.4.1/4.3.8 service containers, fails if any required test is skipped, and includes a down-14/up migration proof in its disposable database. Hosted runs `45826121102` (push) and `45826131425` (pull request) passed for merged SHA `1128f1042e3d951265aa7a8479b2d42c19a7975d`; PR #1 merged as `2fa7eae66e3835c455bba6e4ca325ddae21e342e`. `.github/workflows/nightly.yml` reuses the CI matrix daily at 02:17 UTC and by manual dispatch; it has not yet run on GitHub. A pinned `govulncheck` v1.10.0 job fails on reachable vulnerabilities and publishes non-reachable package/module findings without editing `go.mod` or `go.sum`.
+CI defines the same integration suite against pinned PostgreSQL 18 and RabbitMQ 4.4.1 (with `-race`) and 4.3.8 service containers, fails if any required test is skipped, includes a down-14/up migration proof, runs bounded fuzzing for both `FuzzCanonicalize` (60s) and `FuzzDecode` (45s), and enforces blocking security gates (`security-lint`, `gitleaks`, `zizmor`, `trivy`, `shellcheck`, and pinned `govulncheck` v1.10.0) separately from advisory complexity/style lint. See [SECURITY.md](SECURITY.md) and [docs/operations/runbook.md](docs/operations/runbook.md) §9 for security policy, tool pins, false-positive handling, and Renovate update governance. Hosted runs `45826121102` (push) and `45826131425` (pull request) passed for merged SHA `1128f1042e3d951265aa7a8479b2d42c19a7975d`; PR #1 merged as `2fa7eae66e3835c455bba6e4ca325ddae21e342e`. `.github/workflows/nightly.yml` reuses the CI matrix daily at 02:17 UTC and by manual dispatch via `$/` self-repository syntax; hosted execution of the hardened CI and nightly workflows remains pending until pushed/merged on GitHub.
 
 Local execution evidence (2026-11-24, Phase 6 and Phase 6.1): Go 1.27.4 build/vet and unit tests passed (25/25 test-bearing packages, 29 total); PostgreSQL 18.7 plus RabbitMQ 4.4.1 and 4.3.8 integration passed (28/28 test-bearing packages, 0 failures, 2 Windows-only POSIX-permission skips); Linux CGO race tests passed for the whole module (27/27 test-bearing packages, no data races). The management suite has 23 top-level tests (12 Phase 6 + 11 Phase 6.1). `go mod verify` passed and `go mod tidy -diff` was empty. golangci-lint v2.15.0 ran in Phase 6 as a tool and reported 17 advisory findings (13 pre-existing cyclomatic/cognitive-complexity findings, one `PatchEndpoint` cognitive-complexity finding, and 3 pre-existing `gosec` integer-conversion findings); lint cleanliness is not claimed and lint was not rerun in Phase 6.1. No new migration, local schema rollback or container recreation was needed or performed. See the dated architecture evidence and operations runbook for the remaining nightly-CI and production gates.
 

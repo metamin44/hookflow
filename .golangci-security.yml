@@ -1,0 +1,76 @@
+version: "2"
+
+# Blocking security and correctness linter configuration for HookFlow.
+# Runs as a required CI gate without continue-on-error.
+# Advisory complexity and style checks live separately in .golangci.yml so
+# analyzers are not duplicated and complexity debt never weakens security gates.
+# Go version is inherited automatically from go.mod.
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - bidichk
+    - bodyclose
+    - depguard
+    - durationcheck
+    - errcheck
+    - errorlint
+    - gosec
+    - govet
+    - ineffassign
+    - nilerr
+    - noctx
+    - nolintlint
+    - sqlclosecheck
+    - staticcheck
+  settings:
+    depguard:
+      rules:
+        application-not-command:
+          files:
+            - "**/internal/app/**"
+          deny:
+            - pkg: github.com/metamin44/hookflow/cmd
+              desc: composition roots must not be imported by application packages
+        modules-not-application:
+          files:
+            - "**/internal/modules/**"
+          deny:
+            - pkg: github.com/metamin44/hookflow/internal/app
+              desc: domain modules must not import the application layer
+        platform-not-features:
+          files:
+            - "**/internal/platform/**"
+          deny:
+            - pkg: github.com/metamin44/hookflow/internal/app
+              desc: platform packages must not import the application layer
+            - pkg: github.com/metamin44/hookflow/internal/modules
+              desc: platform packages must not import feature modules
+        shared-not-internals:
+          files:
+            - "**/internal/shared/**"
+          deny:
+            - pkg: github.com/metamin44/hookflow/internal/app
+              desc: shared primitives must remain below application services
+            - pkg: github.com/metamin44/hookflow/internal/modules
+              desc: shared primitives must remain below feature modules
+            - pkg: github.com/metamin44/hookflow/internal/platform
+              desc: shared primitives must not depend on platform implementations
+    nolintlint:
+      allow-unused: false
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - noctx
+
+issues:
+  max-same-issues: 0
+  max-issues-per-linter: 0

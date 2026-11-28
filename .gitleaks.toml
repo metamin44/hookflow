@@ -1,0 +1,143 @@
+# Gitleaks configuration for HookFlow.
+# Extends the built-in Gitleaks ruleset with HookFlow-specific secret formats
+# and strictly scoped (path + pattern) allowlists for documented placeholders
+# and disposable CI/test literals.
+
+title = "HookFlow Gitleaks Configuration"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "hookflow-webhook-secret"
+description = "HookFlow / Standard Webhooks endpoint signing secret (whsec_)"
+regex = '''\b(whsec_[A-Za-z0-9+/]{28,86}={0,2})'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["whsec_"]
+
+[[rules]]
+id = "hookflow-secret-envelope"
+description = "HookFlow v1 encrypted secret envelope (hfse1.)"
+regex = '''\b(hfse1\.[A-Za-z0-9_-]{56,})(?:[^A-Za-z0-9_-]|$)'''
+secretGroup = 1
+entropy = 3.5
+keywords = ["hfse1."]
+
+[[rules]]
+id = "hookflow-api-key-cli-output"
+description = "HookFlow raw API key printed by cmd/apikey"
+regex = '''api_key:\s*([A-Za-z0-9_-]{43})(?:[^A-Za-z0-9_-]|$)'''
+secretGroup = 1
+entropy = 3.5
+keywords = ["api_key:"]
+
+[[rules]]
+id = "hookflow-api-key-assignment"
+description = "HookFlow API key in environment variable or Authorization Bearer header"
+regex = '''(?i)(?:HOOKFLOW_TOKEN|HOOKFLOW_API_KEY|Authorization['"]?\s*[:=]\s*['"]?Bearer)\s*[:=]?\s*['"]?([A-Za-z0-9_-]{43})(?:[^A-Za-z0-9_-]|$)'''
+secretGroup = 1
+entropy = 3.5
+keywords = ["hookflow_token", "hookflow_api_key", "bearer"]
+
+[[rules]]
+id = "hookflow-argon2id-verifier"
+description = "HookFlow Argon2id PHC API-key verifier hash"
+regex = '''(\$argon2id\$v=\d+\$m=\d+,t=\d+,p=\d+\$[A-Za-z0-9+/]{16,}\$[A-Za-z0-9+/]{32,})'''
+secretGroup = 1
+keywords = ["$argon2id$"]
+
+[[rules]]
+id = "hookflow-kek-keyring-json"
+description = "HookFlow File KEK keyring JSON containing raw 32-byte key material"
+regex = '''(?s)"current"\s*:\s*"[A-Za-z0-9._:-]{1,64}"\s*,\s*"keys"\s*:\s*\{[^}]{0,512}"[A-Za-z0-9._:-]{1,64}"\s*:\s*"([A-Za-z0-9_-]{43})"'''
+secretGroup = 1
+entropy = 3.5
+keywords = ["\"keys\""]
+
+[[rules]]
+id = "hookflow-kek-keyring-json-reverse"
+description = "HookFlow File KEK keyring JSON (keys before current) containing raw 32-byte key material"
+regex = '''(?s)"keys"\s*:\s*\{[^}]{0,512}"[A-Za-z0-9._:-]{1,64}"\s*:\s*"([A-Za-z0-9_-]{43})"[^}]{0,512}\}\s*,\s*"current"\s*:\s*"[A-Za-z0-9._:-]{1,64}"'''
+secretGroup = 1
+entropy = 3.5
+keywords = ["\"keys\""]
+
+[[rules]]
+id = "hookflow-kek-key-entry"
+description = "HookFlow KEK entry mapping a kek-* identifier to raw 32-byte base64url key material"
+regex = '''(?i)"kek-[A-Za-z0-9._:-]*"\s*:\s*"([A-Za-z0-9_-]{43})"'''
+secretGroup = 1
+entropy = 3.5
+keywords = ["kek-"]
+
+[[rules]]
+id = "hookflow-amqp-uri-credentials"
+description = "AMQP/AMQPS URI with embedded credentials"
+regex = '''(?i)\bamqps?://[^/\s:@"'`]+:([^/\s@"'`]{4,})@[^\s"'`]+'''
+secretGroup = 1
+keywords = ["amqp://", "amqps://"]
+
+[[rules]]
+id = "hookflow-postgres-uri-credentials"
+description = "PostgreSQL URI with embedded credentials"
+regex = '''(?i)\bpostgres(?:ql)?://[^/\s:@"'`]+:([^/\s@"'`]{4,})@[^\s"'`]+'''
+secretGroup = 1
+keywords = ["postgres://", "postgresql://"]
+
+[[rules]]
+id = "hookflow-env-password-assignment"
+description = "Direct assignment to a HookFlow database or RabbitMQ password variable"
+regex = '''(?i)\b(?:HOOKFLOW_DB_PASSWORD|HOOKFLOW_RABBITMQ_PASSWORD|RABBITMQ_ADMIN_PASSWORD|PGPASSWORD)\s*[:=]\s*['"]?([^'"\s$#]{8,})['"]?'''
+secretGroup = 1
+keywords = [
+  "HOOKFLOW_DB_PASSWORD",
+  "HOOKFLOW_RABBITMQ_PASSWORD",
+  "RABBITMQ_ADMIN_PASSWORD",
+  "PGPASSWORD",
+]
+
+# Narrow, justified allowlists. Each entry requires BOTH the exact file path
+# AND the exact documented placeholder or disposable literal (condition = "AND"),
+# so committing any genuine secret into those same files will still fail.
+
+[[allowlists]]
+description = "Documented local setup placeholders in .env.example, README.md, and validation checks in dev scripts"
+condition = "AND"
+paths = [
+  '''^\.env\.example$''',
+  '''^README\.md$''',
+  '''^scripts/dev-db\.sh$''',
+  '''^scripts/migrate\.sh$''',
+]
+regexes = [
+  '''^replace-with-a-random-local-password$''',
+  '''^replace-with-a-different-random-local-password$''',
+]
+
+[[allowlists]]
+description = "Disposable isolated service-container credentials in GitHub Actions CI"
+condition = "AND"
+paths = [
+  '''^\.github/workflows/ci\.yml$''',
+]
+regexes = [
+  '''^hookflow-ci-postgres$''',
+  '''^hookflow-ci-rabbitmq$''',
+]
+
+[[allowlists]]
+description = "Synthetic loopback dummy credentials and redaction test inputs in unit tests"
+condition = "AND"
+paths = [
+  '''^cmd/outbox-publisher/lifecycle_test\.go$''',
+  '''^cmd/worker/lifecycle_test\.go$''',
+  '''^internal/app/delivery/store_test\.go$''',
+  '''^internal/app/publisher/relay_test\.go$''',
+  '''^internal/platform/http/health_test\.go$''',
+]
+regexes = [
+  '''^password$''',
+  '''^unit-test-secret$''',
+  '''^API_KEY=abcdef123$''',
+]

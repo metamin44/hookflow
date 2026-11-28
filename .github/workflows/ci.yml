@@ -26,7 +26,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version: "1.27.4"
+          go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Check gofmt
         run: |
@@ -46,6 +46,185 @@ jobs:
       - name: Check module tidiness without modifying files
         run: go mod tidy -diff
 
+  security-lint:
+    name: Security lint (blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Run blocking security and correctness linters
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+          args: --config .golangci-security.yml
+
+  secrets:
+    name: Secret detection (Gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install verified Gitleaks v8.30.1
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gitleaks_8.30.1_linux_x64.tar.gz"
+          curl -fsSL --retry 3 \
+            -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz"
+          printf '%s  %s\n' "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb" "$archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+          chmod +x "$RUNNER_TEMP/gitleaks"
+          "$RUNNER_TEMP/gitleaks" version
+      - name: Scan working tree (redacted)
+        run: |
+          "$RUNNER_TEMP/gitleaks" dir --config .gitleaks.toml --redact=100 --no-banner .
+      - name: Scan Git history (redacted)
+        run: |
+          "$RUNNER_TEMP/gitleaks" git --config .gitleaks.toml --redact=100 --no-banner .
+
+  workflow-security:
+    name: Workflow security (Zizmor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install verified Zizmor v1.33.1
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL --retry 3 \
+            -o "$archive" \
+            "https://github.com/zizmorcore/zizmor/releases/download/v1.33.1/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          printf '%s  %s\n' "3e6a301c7a820a2501915f5a9de8c0486da82bdec7965f068477538a98743d43" "$archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" zizmor
+          chmod +x "$RUNNER_TEMP/zizmor"
+          "$RUNNER_TEMP/zizmor" --version
+      - name: Audit GitHub Actions workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          "$RUNNER_TEMP/zizmor" --persona=pedantic --strict-collection .github/workflows
+
+  container-config-security:
+    name: Container & Compose security (Trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install verified Trivy v0.76.2
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/trivy_0.76.2_Linux-64bit.tar.gz"
+          curl -fsSL --retry 3 \
+            -o "$archive" \
+            "https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz"
+          printf '%s  %s\n' "bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf" "$archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" trivy
+          chmod +x "$RUNNER_TEMP/trivy"
+          "$RUNNER_TEMP/trivy" --version
+      - name: Scan Compose and infrastructure configuration (blocking)
+        run: |
+          "$RUNNER_TEMP/trivy" config --config trivy.yaml --severity HIGH,CRITICAL --exit-code 1 .
+      - name: Collect immutable pinned service images
+        run: |
+          set -euo pipefail
+          grep -Eo '[a-z0-9./_-]+:[A-Za-z0-9._-]+@sha256:[a-f0-9]{64}' compose.yaml .github/workflows/ci.yml \
+            | sort -u > "$RUNNER_TEMP/hookflow-pinned-images.txt"
+          count="$(wc -l < "$RUNNER_TEMP/hookflow-pinned-images.txt")"
+          if [ "$count" -lt 3 ]; then
+            echo "Expected at least 3 immutable @sha256 pinned service images, found $count"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/hookflow-pinned-images.txt"
+      - name: Scan pinned service images for fixed CRITICAL OS CVEs (blocking)
+        run: |
+          set -euo pipefail
+          while IFS= read -r image; do
+            "$RUNNER_TEMP/trivy" image \
+              --config trivy.yaml \
+              --scanners vuln \
+              --pkg-types os \
+              --severity CRITICAL \
+              --ignore-unfixed \
+              --exit-code 1 \
+              "$image"
+          done < "$RUNNER_TEMP/hookflow-pinned-images.txt"
+      - name: Publish full HIGH/CRITICAL image visibility report
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            cat <<'EOF'
+          ### Trivy pinned service-image visibility (OS + embedded binaries, HIGH/CRITICAL, fixed only)
+
+          Fixed CRITICAL OS CVEs fail this job above. Full HIGH/CRITICAL visibility (including embedded binaries such as gosu) is published here for digest-refresh triage.
+          EOF
+            echo
+            if [ -f "$RUNNER_TEMP/hookflow-pinned-images.txt" ]; then
+              while IFS= read -r image; do
+                printf '#### \x60%s\x60\n' "$image"
+                printf '\x60\x60\x60\n'
+                "$RUNNER_TEMP/trivy" image \
+                  --config trivy.yaml \
+                  --scanners vuln \
+                  --pkg-types os,library \
+                  --severity HIGH,CRITICAL \
+                  --ignore-unfixed \
+                  --exit-code 0 \
+                  --quiet \
+                  "$image" || true
+                printf '\x60\x60\x60\n'
+              done < "$RUNNER_TEMP/hookflow-pinned-images.txt"
+            else
+              echo 'No pinned service images file was produced.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  shell-checks:
+    name: Shell script checks (ShellCheck)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install verified ShellCheck v0.11.0
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/shellcheck-v0.11.0.linux.x86_64.tar.xz"
+          curl -fsSL --retry 3 \
+            -o "$archive" \
+            "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz"
+          printf '%s  %s\n' "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198" "$archive" | sha256sum -c -
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          chmod +x "$RUNNER_TEMP/shellcheck-v0.11.0/shellcheck"
+          "$RUNNER_TEMP/shellcheck-v0.11.0/shellcheck" --version
+      - name: Lint shell scripts
+        run: |
+          "$RUNNER_TEMP/shellcheck-v0.11.0/shellcheck" scripts/*.sh
+      - name: Run static script safety checks
+        run: |
+          bash scripts/dev-db_test.sh
+
   jcs-conformance:
     name: JCS conformance (RFC 8785)
     runs-on: ubuntu-latest
@@ -58,7 +237,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version: "1.27.4"
+          go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Verify conformance fixtures and reference runtime
         run: |
@@ -109,17 +288,70 @@ jobs:
             find internal/platform/jcs/testdata/fuzz -type f -print -exec cat {} \;
           fi
 
-  integration:
-    name: Integration (${{ matrix.rabbitmq }})
+  secrets-fuzz:
+    name: Secret envelope fuzzing (FuzzDecode)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Bounded fuzz Decode (45s)
+        run: |
+          # Deterministic budget: 45 seconds of active fuzzing against the v1
+          # hfse1. secret envelope parser. Zero executed cases fail the gate.
+          set -o pipefail
+          go test -json -run='^$' -fuzz='^FuzzDecode$' -fuzztime=45s ./internal/platform/secrets \
+            | tee "$RUNNER_TEMP/hookflow-secrets-fuzz.jsonl"
+          python3 - "$RUNNER_TEMP/hookflow-secrets-fuzz.jsonl" <<'PY'
+          import json
+          import re
+          import sys
+          execs = 0
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              for line in stream:
+                  try:
+                      row = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  if row.get("Action") != "output":
+                      continue
+                  for count in re.findall(r"execs:\s*(\d+)", row.get("Output", "")):
+                      execs = max(execs, int(count))
+          if execs == 0:
+              print("FuzzDecode gate executed zero fuzz cases")
+              sys.exit(1)
+          print("FuzzDecode gate executed at least", execs, "cases")
+          PY
+      - name: Fuzz crasher summary (paths only, no raw secret dump)
+        if: failure()
+        run: |
+          if [ -d internal/platform/secrets/testdata/fuzz ]; then
+            echo "FuzzDecode produced failing corpus entries:"
+            find internal/platform/secrets/testdata/fuzz -type f -printf '%p (%s bytes)\n'
+          fi
+
+  integration:
+    name: Integration (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
           - rabbitmq: "4.4.1"
+            label: "4.4.1, race"
+            race: "true"
             image: rabbitmq:4.4.1-management-alpine@sha256:2b47b1aa05ec7e373950ad2e9200e9f95a9da7039c8d22c19dbf5a59101362c4
           - rabbitmq: "4.3.8"
+            label: "4.3.8"
+            race: "false"
             image: rabbitmq:4.3.8-management-alpine@sha256:977a6cf07ea9065116aaa40e7dc147ad25621d71a654248d36d79e5e7500be3e
     services:
       postgres:
@@ -167,14 +399,22 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version: "1.27.4"
+          go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Apply migrations
         run: go run ./cmd/migrate up
       - name: Integration tests (no skipped gates)
+        env:
+          INTEGRATION_RACE: ${{ matrix.race }}
+          CGO_ENABLED: "1"
         run: |
           set -o pipefail
-          go test -json -tags=integration ./... -count=1 -p 1 | tee "$RUNNER_TEMP/hookflow-integration.jsonl"
+          race_flags=()
+          if [ "$INTEGRATION_RACE" = "true" ]; then
+            race_flags=(-race)
+          fi
+          go test "${race_flags[@]}" -json -tags=integration ./... -count=1 -p 1 \
+            | tee "$RUNNER_TEMP/hookflow-integration.jsonl"
           python3 - "$RUNNER_TEMP/hookflow-integration.jsonl" <<'PY'
           import json
           import sys
@@ -197,7 +437,7 @@ jobs:
           go run ./cmd/migrate version
 
   race:
-    name: Race detector
+    name: Race detector (unit)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -210,7 +450,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version: "1.27.4"
+          go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Race tests
         run: go test -race ./... -count=1
@@ -227,7 +467,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version: "1.27.4"
+          go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Install pinned govulncheck
         run: |
@@ -244,11 +484,13 @@ jobs:
         if: always()
         run: |
           {
-            echo '### govulncheck'
+            cat <<'EOF'
+          ### govulncheck
+
+          Reachable (symbol) findings fail this job. Package and module findings that no code path reaches are reported below; this workflow never edits go.mod or go.sum to suppress them.
+          EOF
             echo
-            echo 'Reachable (symbol) findings fail this job. Package and module findings that no code path reaches are reported below; this workflow never edits `go.mod` or `go.sum` to suppress them.'
-            echo
-            echo '```'
+            printf '\x60\x60\x60\n'
             if [ -f "$RUNNER_TEMP/hookflow-govulncheck.txt" ]; then
               if grep -q '^=== Symbol Results ===' "$RUNNER_TEMP/hookflow-govulncheck.txt"; then
                 sed -n '/^=== Symbol Results ===/,$p' "$RUNNER_TEMP/hookflow-govulncheck.txt"
@@ -258,11 +500,11 @@ jobs:
             else
               echo 'No govulncheck output was produced.'
             fi
-            echo '```'
+            printf '\x60\x60\x60\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
   lint:
-    name: golangci-lint (advisory)
+    name: Complexity & style lint (advisory)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -273,9 +515,9 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version: "1.27.4"
+          go-version-file: go.mod
           cache-dependency-path: go.sum
-      - name: Run golangci-lint
+      - name: Run advisory complexity and style linters
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         continue-on-error: true
         with:

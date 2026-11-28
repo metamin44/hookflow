@@ -340,8 +340,9 @@ const (
 	EnvWorkerMaxAttempts          = "HOOKFLOW_WORKER_MAX_ATTEMPTS"
 	EnvWorkerRetryHorizon         = "HOOKFLOW_WORKER_RETRY_HORIZON"
 	EnvWorkerDecryptFailurePacing = "HOOKFLOW_WORKER_DECRYPT_FAILURE_PACING"
-	EnvWorkerSecretResolution     = "HOOKFLOW_WORKER_SECRET_RESOLUTION_BUDGET" //nolint:gosec // Environment variable name, not a credential.
-	EnvWorkerResponseBodyLimit    = "HOOKFLOW_WORKER_RESPONSE_BODY_LIMIT"
+	// #nosec G101 -- environment variable name constant, not a hardcoded credential.
+	EnvWorkerSecretResolution  = "HOOKFLOW_WORKER_SECRET_RESOLUTION_BUDGET"
+	EnvWorkerResponseBodyLimit = "HOOKFLOW_WORKER_RESPONSE_BODY_LIMIT"
 )
 
 const (

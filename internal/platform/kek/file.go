@@ -139,7 +139,7 @@ func (p *FileProvider) Rewrap(ctx context.Context, w Wrapped, c Context) (Wrappe
 }
 
 func readKeyringFile(path string) ([]byte, error) {
-	//nolint:gosec // The keyring path is operator configuration, opened read-only at startup.
+	// #nosec G304 -- keyring path is operator-supplied startup configuration validated as a regular file.
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("%w: keyring file cannot be opened", ErrKeyring)
